@@ -1,0 +1,72 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Node.js
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+coverage/
+
+# Environment files
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+backend/.env
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# Local databases and model data
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+faiss_index/
+models/
+checkpoints/
+
+# Generated media and uploads
+uploads/
+storage/
+generated/
