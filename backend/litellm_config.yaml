@@ -1,0 +1,25 @@
+
+model_list:
+  # Primary: OpenAI
+  - model_name: omni-primary
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Fallback: Google Gemini
+  - model_name: omni-gemini-fallback
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/LITELLM_DATABASE_URL
+
+litellm_settings:
+  num_retries: 1
+
+router_settings:
+  fallbacks:
+    - omni-primary:
+        - omni-gemini-fallback
