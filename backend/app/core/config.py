@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # Usage and cost tracking
     LLM_MODEL_PRICING: dict[str, dict[str, float]] = {}
 
+    # Langfuse Observability
+    LANGFUSE_PUBLIC_KEY: str | None = None
+    LANGFUSE_SECRET_KEY: str | None = None
+    LANGFUSE_BASE_URL: str = "https://cloud.langfuse.com"
+
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
 

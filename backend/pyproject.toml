@@ -8,6 +8,7 @@ dependencies = [
     "email-validator>=2.3.0",
     "fastapi[standard]>=0.162.4",
     "httpx>=0.28.1",
+    "langfuse>=5",
     "litellm[extra-proxy,proxy]>=1.109.1",
     "prisma==0.11.0",
     "pwdlib[argon2]>=0.3.1",
