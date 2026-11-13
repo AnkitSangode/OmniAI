@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # Usage and cost tracking
     LLM_MODEL_PRICING: dict[str, dict[str, float]] = {}
 
+    # Image storage
+    IMAGE_STORAGE_DIR: str = "storage/images"
+    HF_TOKEN: str | None = None
+    IMAGE_MODEL_ID: str = "black-forest-labs/FLUX.1-schnell"
+    IMAGE_PROVIDER: str = "auto"
+    IMAGE_INFERENCE_TIMEOUT_SECONDS: int = 180
+    IMAGE_BACKEND: str = "mock"
+
     # Langfuse Observability
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None

@@ -77,6 +77,7 @@ def calculate_cost_safely(
         return None
 
 
+
 def update_observability_safely(
     observability: LangfuseService,
     *,
@@ -97,17 +98,16 @@ def update_observability_safely(
             generation=generation,
             status=status_value,
             request_type=request_type,
-            tokens={
-                "input": prompt_tokens,
-                "output": completion_tokens,
-                "total": total_tokens,
-            },
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
             actual_model=model,
             estimated_cost=estimated_cost,
             error_code=error_code,
         )
     except Exception:
         logger.exception("Failed to update Langfuse generation.")
+
 
 
 async def record_usage_safely(
@@ -143,7 +143,6 @@ async def record_usage_safely(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            estimated_cost=estimated_cost,
             latency_ms=latency_ms,
             status=status_value,
             error_code=error_code,

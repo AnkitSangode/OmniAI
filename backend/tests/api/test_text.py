@@ -456,7 +456,7 @@ def test_generate_text_creates_langfuse_trace(api_client):
     update_args = observability.update_generation.call_args.kwargs
 
     assert update_args["status"] == "success"
-    assert update_args["tokens"]["input"] == 10
-    assert update_args["tokens"]["output"] == 5
-    assert update_args["tokens"]["total"] == 15
+    assert update_args["prompt_tokens"] == 10
+    assert update_args["completion_tokens"] == 5
+    assert update_args["total_tokens"] == 15
     assert update_args["actual_model"] == "omni-primary"

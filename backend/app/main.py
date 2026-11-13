@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.auth import router as auth_router
 from app.api.v1.endpoints.text import router as text_router
 from app.api.v1.endpoints.prompts import router as prompts_router
+from app.api.v1.endpoints.images import router as images_router
 
 from app.core.config import get_settings
 from app.services.llm.litellm_client import LiteLLMClient
@@ -53,3 +54,5 @@ app.include_router(
 )
 
 app.include_router(prompts_router, prefix="/api/v1")
+
+app.include_router(images_router, prefix="/api/v1")
