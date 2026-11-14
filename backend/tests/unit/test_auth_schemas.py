@@ -3,8 +3,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.auth import (
-    UserRegisterRequest,
     UserLoginRequest,
+    UserRegisterRequest,
 )
 
 

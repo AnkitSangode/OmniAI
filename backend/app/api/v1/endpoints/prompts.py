@@ -22,7 +22,6 @@ from app.services.prompt_service import (
     PromptVersionNotFoundError,
 )
 
-
 router = APIRouter(prefix="/prompts", tags=["Prompt Library"])
 
 

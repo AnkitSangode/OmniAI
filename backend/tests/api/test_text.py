@@ -8,8 +8,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-import app.main as main
-
+from app import main
 from app.api.dependencies import get_current_user
 from app.api.v1.endpoints.text import (
     get_observability_service,
@@ -20,7 +19,6 @@ from app.services.llm.litellm_client import (
     LiteLLMTimeoutError,
 )
 from app.services.llm.schemas import TextGenerationResponse
-
 
 logger = logging.getLogger(__name__)
 

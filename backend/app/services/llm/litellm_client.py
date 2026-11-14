@@ -1,4 +1,6 @@
+import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -8,9 +10,6 @@ from app.services.llm.schemas import (
     TextGenerationRequest,
     TextGenerationResponse,
 )
-
-import json
-from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 

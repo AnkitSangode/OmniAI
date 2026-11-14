@@ -1,9 +1,10 @@
 
 import logging
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Iterator
+from typing import Any
 
 from langfuse import Langfuse, propagate_attributes
 

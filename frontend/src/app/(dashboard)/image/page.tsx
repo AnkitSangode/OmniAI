@@ -2,8 +2,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
+import { api } from "@/lib/api";
 
 interface ImageGeneration {
   id: string;
@@ -22,20 +21,33 @@ interface ImageHistory {
   total: number;
 }
 
-function getToken() {
-  return localStorage.getItem("omniai_access_token");
-}
+async function getErrorMessage(error: unknown): Promise<string> {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "response" in error
+  ) {
+    const response = (
+      error as {
+        response?: {
+          data?: {
+            detail?: string;
+          };
+        };
+      }
+    ).response;
 
-async function getErrorMessage(response: Response) {
-  try {
-    const data = await response.json();
-    return data.detail || "Something went wrong.";
-  } catch {
-    return "Something went wrong.";
+    if (response?.data?.detail) {
+      return response.data.detail;
+    }
   }
+
+  return error instanceof Error
+    ? error.message
+    : "Something went wrong.";
 }
 
-// Authenticated image thumbnail for history cards
+// Authenticated image thumbnail for history cards.
 function HistoryThumbnail({
   image,
 }: {
@@ -50,29 +62,14 @@ function HistoryThumbnail({
 
     async function loadThumbnail() {
       try {
-        const token = getToken();
-
-        if (!token || !API_URL) {
-          setFailed(true);
-          return;
-        }
-
-        const response = await fetch(
-          `${API_URL}/images/${image.id}/file`,
+        const response = await api.get(
+          `/images/${image.id}/file`,
           {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
+            responseType: "blob",
           }
         );
 
-        if (!response.ok) {
-          throw new Error("Unable to load thumbnail.");
-        }
-
-        const blob = await response.blob();
-
-        objectUrl = URL.createObjectURL(blob);
+        objectUrl = URL.createObjectURL(response.data);
 
         if (!cancelled) {
           setUrl(objectUrl);
@@ -86,7 +83,7 @@ function HistoryThumbnail({
       }
     }
 
-    loadThumbnail();
+    void loadThumbnail();
 
     return () => {
       cancelled = true;
@@ -122,6 +119,8 @@ export default function ImageWorkspacePage() {
   const [height, setHeight] = useState(512);
 
   const [history, setHistory] = useState<ImageGeneration[]>([]);
+  const [total, setTotal] = useState(0);
+
   const [selectedImage, setSelectedImage] =
     useState<ImageGeneration | null>(null);
 
@@ -129,88 +128,58 @@ export default function ImageWorkspacePage() {
 
   const [loading, setLoading] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
+
   const [error, setError] = useState<string | null>(null);
 
-  // Load generation history
+  // Load image generation history.
   const loadHistory = useCallback(async () => {
     try {
-      const token = getToken();
+      setLoadingHistory(true);
 
-      if (!token || !API_URL) {
-        setError("Please log in to use Image AI.");
-        return;
-      }
-
-      const response = await fetch(
-        `${API_URL}/images/history`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
+      const response = await api.get<ImageHistory>(
+        "/images/history"
       );
 
-      if (!response.ok) {
-        throw new Error(await getErrorMessage(response));
-      }
-
-      const data: ImageHistory = await response.json();
-
-      setHistory(data.items);
+      setHistory(response.data.items);
+      setTotal(response.data.total);
+      setError(null);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load image history."
+        await getErrorMessage(err)
       );
     } finally {
       setLoadingHistory(false);
     }
   }, []);
 
-  // Load a protected image using its authenticated endpoint
+  // Load an authenticated image using its protected endpoint.
   const loadImage = useCallback(async (image: ImageGeneration) => {
     try {
-      const token = getToken();
-
-      if (!token || !API_URL) {
-        throw new Error("Please log in again.");
-      }
-
-      const response = await fetch(
-        `${API_URL}/images/${image.id}/file`,
+      const response = await api.get(
+        `/images/${image.id}/file`,
         {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          responseType: "blob",
         }
       );
 
-      if (!response.ok) {
-        throw new Error(await getErrorMessage(response));
-      }
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(response.data);
 
       setSelectedImage(image);
       setPreviewUrl(url);
       setError(null);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load image."
+        await getErrorMessage(err)
       );
     }
   }, []);
 
-  // Initial history loading
+  // Initial history loading.
   useEffect(() => {
-    loadHistory();
+    void loadHistory();
   }, [loadHistory]);
 
-  // Revoke previous preview URLs to prevent memory leaks
+  // Revoke previous preview URLs to prevent memory leaks.
   useEffect(() => {
     return () => {
       if (previewUrl) {
@@ -219,7 +188,7 @@ export default function ImageWorkspacePage() {
     };
   }, [previewUrl]);
 
-  // Generate a new image
+  // Generate a new image.
   const generateImage = async () => {
     if (prompt.trim().length < 3) {
       setError(
@@ -232,49 +201,33 @@ export default function ImageWorkspacePage() {
     setError(null);
 
     try {
-      const token = getToken();
-
-      if (!token || !API_URL) {
-        throw new Error("Please log in again.");
-      }
-
-      const response = await fetch(
-        `${API_URL}/images/generate`,
+      const response = await api.post<ImageGeneration>(
+        "/images/generate",
         {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            prompt: prompt.trim(),
-            width,
-            height,
-          }),
+          prompt: prompt.trim(),
+          width,
+          height,
+        },
+        {
+          timeout: 0,
         }
       );
 
-      if (!response.ok) {
-        throw new Error(await getErrorMessage(response));
-      }
+      const generated = response.data;
 
-      const generated: ImageGeneration = await response.json();
-
-      // Refresh history and display the generated image
+      // Refresh history and display the generated image.
       await loadHistory();
       await loadImage(generated);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Image generation failed."
+        await getErrorMessage(err)
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // Download the currently selected image
+  // Download the currently selected image.
   const downloadImage = () => {
     if (!previewUrl || !selectedImage) {
       return;
@@ -289,6 +242,9 @@ export default function ImageWorkspacePage() {
     link.click();
     link.remove();
   };
+
+  const isMockProvider = (provider: string) =>
+    provider.toLowerCase().includes("mock");
 
   return (
     <div className="space-y-8 pb-10">
@@ -306,7 +262,10 @@ export default function ImageWorkspacePage() {
 
       {/* Error message */}
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">
+        <div
+          role="alert"
+          className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400"
+        >
           {error}
         </div>
       )}
@@ -338,7 +297,7 @@ export default function ImageWorkspacePage() {
             <textarea
               id="image-prompt"
               value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
+              onChange={(event) => setPrompt(event.target.value)}
               placeholder="A futuristic city with flying cars, cinematic lighting..."
               rows={7}
               maxLength={2000}
@@ -364,8 +323,8 @@ export default function ImageWorkspacePage() {
               <select
                 id="image-width"
                 value={width}
-                onChange={(e) =>
-                  setWidth(Number(e.target.value))
+                onChange={(event) =>
+                  setWidth(Number(event.target.value))
                 }
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-950 p-3 text-sm"
               >
@@ -387,8 +346,8 @@ export default function ImageWorkspacePage() {
               <select
                 id="image-height"
                 value={height}
-                onChange={(e) =>
-                  setHeight(Number(e.target.value))
+                onChange={(event) =>
+                  setHeight(Number(event.target.value))
                 }
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-950 p-3 text-sm"
               >
@@ -417,9 +376,11 @@ export default function ImageWorkspacePage() {
             )}
           </button>
 
-          <p className="text-center text-xs text-zinc-500">
-            Development mode: using OmniAI mock image provider.
-          </p>
+          {selectedImage && isMockProvider(selectedImage.provider) && (
+            <p className="text-center text-xs text-amber-400">
+              Development mode: this image was generated using the mock provider.
+            </p>
+          )}
 
         </section>
 
@@ -486,6 +447,8 @@ export default function ImageWorkspacePage() {
                 {selectedImage.width} × {selectedImage.height}
                 {" · "}
                 {selectedImage.provider}
+                {" · "}
+                {selectedImage.model}
               </p>
             </div>
           )}
@@ -510,7 +473,7 @@ export default function ImageWorkspacePage() {
           </div>
 
           <button
-            onClick={loadHistory}
+            onClick={() => void loadHistory()}
             disabled={loadingHistory}
             className="rounded-lg border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800 disabled:opacity-50"
           >
@@ -540,7 +503,7 @@ export default function ImageWorkspacePage() {
 
               <button
                 key={image.id}
-                onClick={() => loadImage(image)}
+                onClick={() => void loadImage(image)}
                 className={`rounded-xl border p-3 text-left transition hover:border-blue-500 ${
                   selectedImage?.id === image.id
                     ? "border-blue-500 bg-blue-500/5"
@@ -548,7 +511,7 @@ export default function ImageWorkspacePage() {
                 }`}
               >
 
-                {/* Actual authenticated PNG thumbnail */}
+                {/* Authenticated image thumbnail */}
                 <HistoryThumbnail image={image} />
 
                 <p className="mt-3 line-clamp-2 text-sm font-medium">
@@ -557,6 +520,10 @@ export default function ImageWorkspacePage() {
 
                 <p className="mt-2 text-xs text-zinc-500">
                   {image.width} × {image.height}
+                </p>
+
+                <p className="mt-1 text-xs text-zinc-500">
+                  {image.provider}
                 </p>
 
                 <p className="mt-1 text-xs text-zinc-500">
@@ -571,6 +538,10 @@ export default function ImageWorkspacePage() {
 
           </div>
         )}
+
+        <p className="text-xs text-zinc-500">
+          Showing {history.length} of {total} generations.
+        </p>
 
       </section>
 

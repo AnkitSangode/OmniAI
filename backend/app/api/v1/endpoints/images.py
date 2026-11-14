@@ -1,5 +1,4 @@
 
-from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -7,6 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.image import (
@@ -20,7 +20,6 @@ from app.services.images.huggingface_provider import (
 from app.services.images.image_service import ImageService
 from app.services.images.mock_provider import MockImageProvider
 from app.storage.image_storage import ImageStorageService
-from app.core.config import get_settings
 
 router = APIRouter(prefix="/images", tags=["Image AI"])
 

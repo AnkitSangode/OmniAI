@@ -8,13 +8,12 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import (
-    UserRegisterRequest,
-    UserLoginRequest,
-    UserResponse,
     TokenResponse,
+    UserLoginRequest,
+    UserRegisterRequest,
+    UserResponse,
 )
 from app.services.auth_service import AuthService
-
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 

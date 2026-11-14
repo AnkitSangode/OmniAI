@@ -39,13 +39,13 @@ class UsageService:
         input_cost = (
             Decimal(prompt_tokens)
             * Decimal(str(input_rate))
-            / Decimal("1000000")
+            / Decimal(1000000)
         )
 
         output_cost = (
             Decimal(completion_tokens)
             * Decimal(str(output_rate))
-            / Decimal("1000000")
+            / Decimal(1000000)
         )
 
         return input_cost + output_cost

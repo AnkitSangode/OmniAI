@@ -1,5 +1,5 @@
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-import app.main as main
+from app import main
 from app.api.dependencies import get_current_user
 from app.api.v1.endpoints.prompts import get_prompt_service
 from app.db.session import get_db
@@ -15,7 +15,7 @@ from app.services.prompt_service import PromptNotFoundError
 
 
 def make_prompt(user_id):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     return SimpleNamespace(
         id=uuid4(),
@@ -34,7 +34,7 @@ def make_version(prompt_id, version_number=1, content=None):
         prompt_id=prompt_id,
         version_number=version_number,
         content=content or "You are a technical interviewer.",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 

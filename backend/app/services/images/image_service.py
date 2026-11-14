@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.image_generation import ImageGeneration
 from app.repositories.image_repository import ImageRepository
 from app.schemas.image import (
-    ImageGenerationRequest,
     ImageGenerationHistoryResponse,
+    ImageGenerationRequest,
     ImageGenerationResponse,
 )
 from app.services.images.base import ImageProvider

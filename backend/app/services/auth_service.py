@@ -1,15 +1,14 @@
 
 from fastapi import HTTPException, status
 
-from app.core.config import get_settings
 from app.core.security import (
+    create_access_token,
     hash_password,
     verify_password,
-    create_access_token,
 )
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
-from app.schemas.auth import UserRegisterRequest, UserLoginRequest
+from app.schemas.auth import UserLoginRequest, UserRegisterRequest
 
 
 class AuthService:

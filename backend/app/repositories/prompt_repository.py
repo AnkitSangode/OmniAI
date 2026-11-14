@@ -1,11 +1,10 @@
 
 from uuid import UUID
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.prompt import Prompt, PromptVersion
-from sqlalchemy import desc, func, select
 
 
 class PromptRepository:

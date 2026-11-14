@@ -12,7 +12,6 @@ from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
 
-
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
