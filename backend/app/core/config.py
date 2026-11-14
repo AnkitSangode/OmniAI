@@ -48,6 +48,12 @@ class Settings(BaseSettings):
 
     AUDIO_INFERENCE_TIMEOUT_SECONDS: int = 180
 
+    # Video processing
+    VIDEO_STORAGE_DIR: str = "storage/videos"
+    FFMPEG_TIMEOUT_SECONDS: int = 300
+    MAX_VIDEO_DURATION_SECONDS: int = 1800
+    VIDEO_STORAGE_DIR: str = "storage/videos"
+
 
     LOCAL_WHISPER_MODEL: str = "base"
     LOCAL_WHISPER_DEVICE: str = "cpu"

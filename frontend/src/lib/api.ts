@@ -16,6 +16,16 @@ export const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
+  // FormData requests must let the browser set Content-Type,
+  // including the multipart boundary.
+  if (
+    typeof FormData !== "undefined" &&
+    config.data instanceof FormData
+  ) {
+    config.headers.delete("Content-Type");
+  }
+
+  // Attach authentication token.
   if (typeof window !== "undefined") {
     const token = localStorage.getItem("omniai_access_token");
 
