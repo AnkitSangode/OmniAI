@@ -171,6 +171,18 @@ async def record_usage_safely(
         )
 
 
+def get_last_user_message(payload: TextGenerationRequest) -> str | None:
+    """Return the most recent user message for output moderation context."""
+    return next(
+        (
+            message.content
+            for message in reversed(payload.messages)
+            if message.role == "user"
+        ),
+        None,
+    )
+
+
 async def moderate_input(
     safety_service: SafetyService | None,
     payload: TextGenerationRequest,
@@ -221,6 +233,7 @@ async def generate_text(
 ):
     request_id = str(uuid4())
     model = payload.model or llm_client.default_model
+    user_message = get_last_user_message(payload)
     started_at = perf_counter()
     generation = None
 
@@ -242,7 +255,10 @@ async def generate_text(
             # Moderate the newly generated response before returning it.
             if safety_service is not None:
                 try:
-                    await safety_service.check_output(response.content)
+                    await safety_service.check_output(
+                            response.content,
+                            context=user_message,
+                        )
                 except UnsafeContentError:
                     latency_ms = int(
                         (perf_counter() - started_at) * 1000
@@ -475,6 +491,7 @@ async def stream_text(
 
     async def event_generator():
         started_at = perf_counter()
+        user_message = get_last_user_message(payload)
 
         prompt_tokens = 0
         completion_tokens = 0
@@ -552,7 +569,8 @@ async def stream_text(
                             complete_content = "".join(buffered_content)
 
                             await safety_service.check_output(
-                                complete_content
+                                complete_content,
+                                context=user_message,
                             )
 
                             if complete_content:

@@ -1,3 +1,4 @@
+
 from typing import Protocol
 
 from app.services.safety.schemas import (
@@ -13,8 +14,9 @@ class Moderator(Protocol):
         text: str,
         *,
         role: str,
+        context: str | None = None,
     ) -> ModerationResult:
-        """Classify text as safe or unsafe."""
+        """Classify a user message or assistant response."""
         ...
 
 
@@ -25,14 +27,24 @@ class SafetyService:
     async def check_input(self, text: str) -> ModerationResult:
         return await self._check(text, role="user")
 
-    async def check_output(self, text: str) -> ModerationResult:
-        return await self._check(text, role="assistant")
+    async def check_output(
+        self,
+        text: str,
+        *,
+        context: str | None = None,
+    ) -> ModerationResult:
+        return await self._check(
+            text,
+            role="assistant",
+            context=context,
+        )
 
     async def _check(
         self,
         text: str,
         *,
         role: str,
+        context: str | None = None,
     ) -> ModerationResult:
         if not text or not text.strip():
             return ModerationResult(is_safe=True)
@@ -41,6 +53,7 @@ class SafetyService:
             result = await self.moderator.moderate(
                 text,
                 role=role,
+                context=context,
             )
         except Exception as exc:
             raise SafetyServiceUnavailable(

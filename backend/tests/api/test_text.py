@@ -200,7 +200,8 @@ def test_generate_text_success(api_client):
 
     mock_safety.check_input.assert_awaited_once_with("Hello")
     mock_safety.check_output.assert_awaited_once_with(
-        "Hello from OmniAI!"
+        "Hello from OmniAI!",
+        context="Hello",
     )
     mock_llm.generate.assert_awaited_once()
 
@@ -286,7 +287,8 @@ def test_generate_text_moderates_user_input(api_client):
 
     mock_safety.check_input.assert_awaited_once_with("Hello")
     mock_safety.check_output.assert_awaited_once_with(
-        "Hello from OmniAI!"
+        "Hello from OmniAI!",
+        context="Hello",
     )
     mock_llm.generate.assert_awaited_once()
 
@@ -386,15 +388,17 @@ def test_stream_text_success(api_client):
 
     mock_safety.check_input.assert_awaited_once_with("Hello")
     mock_safety.check_output.assert_awaited_once_with(
-        "Hello from OmniAI"
+        "Hello from OmniAI",
+        context="Hello",
     )
 
 
 def test_stream_text_buffers_content_until_moderated(api_client):
     client, _, _, _, _, mock_safety = api_client
 
-    def assert_output_is_safe(content):
+    async def assert_output_is_safe(content, *, context=None):
         assert content == "Hello from OmniAI"
+        assert context == "Hello"
 
     mock_safety.check_output.side_effect = assert_output_is_safe
 
