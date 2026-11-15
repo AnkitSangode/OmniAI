@@ -12,6 +12,7 @@ from app import main
 from app.api.dependencies import get_current_user
 from app.api.v1.endpoints.text import (
     get_observability_service,
+    get_safety_service,
     get_usage_service,
 )
 from app.services.llm.litellm_client import (
@@ -19,6 +20,11 @@ from app.services.llm.litellm_client import (
     LiteLLMTimeoutError,
 )
 from app.services.llm.schemas import TextGenerationResponse
+from app.services.safety.schemas import (
+    ModerationResult,
+    SafetyServiceUnavailable,
+    UnsafeContentError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +37,7 @@ def api_client(monkeypatch):
     - Authenticated user
     - Usage service
     - Langfuse observability service
+    - Safety service
     """
 
     test_user = SimpleNamespace(
@@ -88,7 +95,15 @@ def api_client(monkeypatch):
     mock_observability.update_generation = Mock()
     mock_observability.shutdown = Mock()
 
-    # Mock the dependencies created by the application lifespan.
+    mock_safety = Mock()
+    mock_safety.check_input = AsyncMock(
+        return_value=ModerationResult(is_safe=True)
+    )
+    mock_safety.check_output = AsyncMock(
+        return_value=ModerationResult(is_safe=True)
+    )
+
+    # Mock dependencies created by the application lifespan.
     monkeypatch.setattr(
         main,
         "get_settings",
@@ -101,7 +116,6 @@ def api_client(monkeypatch):
         lambda settings: mock_llm,
     )
 
-    # Some application lifespan implementations shut down Langfuse.
     if hasattr(main, "get_langfuse_service"):
         monkeypatch.setattr(
             main,
@@ -123,6 +137,10 @@ def api_client(monkeypatch):
         lambda: mock_observability
     )
 
+    main.app.dependency_overrides[get_safety_service] = (
+        lambda: mock_safety
+    )
+
     try:
         with TestClient(main.app) as client:
             yield (
@@ -131,6 +149,7 @@ def api_client(monkeypatch):
                 mock_usage_service,
                 mock_observability,
                 test_user,
+                mock_safety,
             )
     finally:
         main.app.dependency_overrides.clear()
@@ -148,17 +167,24 @@ def valid_generation_payload():
     }
 
 
-def test_generate_text_success(api_client):
-    client, mock_llm, _, _, _ = api_client
-
-    mock_llm.generate.return_value = TextGenerationResponse(
-        request_id="provider-request-123",
+def make_generation_response(
+    content="Hello from OmniAI!",
+    request_id="provider-request-123",
+):
+    return TextGenerationResponse(
+        request_id=request_id,
         model="omni-primary",
-        content="Hello from OmniAI!",
+        content=content,
         prompt_tokens=10,
         completion_tokens=5,
         total_tokens=15,
     )
+
+
+def test_generate_text_success(api_client):
+    client, mock_llm, _, _, _, mock_safety = api_client
+
+    mock_llm.generate.return_value = make_generation_response()
 
     response = client.post(
         "/api/v1/text/generate",
@@ -172,11 +198,15 @@ def test_generate_text_success(api_client):
     assert response.json()["completion_tokens"] == 5
     assert response.json()["total_tokens"] == 15
 
+    mock_safety.check_input.assert_awaited_once_with("Hello")
+    mock_safety.check_output.assert_awaited_once_with(
+        "Hello from OmniAI!"
+    )
     mock_llm.generate.assert_awaited_once()
 
 
 def test_generate_text_unauthorized(api_client):
-    client, _, _, _, _ = api_client
+    client, _, _, _, _, _ = api_client
 
     main.app.dependency_overrides.pop(
         get_current_user,
@@ -192,7 +222,7 @@ def test_generate_text_unauthorized(api_client):
 
 
 def test_generate_text_invalid_request(api_client):
-    client, mock_llm, _, _, _ = api_client
+    client, mock_llm, _, _, _, mock_safety = api_client
 
     response = client.post(
         "/api/v1/text/generate",
@@ -203,10 +233,11 @@ def test_generate_text_invalid_request(api_client):
 
     assert response.status_code == 422
     mock_llm.generate.assert_not_awaited()
+    mock_safety.check_input.assert_not_awaited()
 
 
 def test_generate_text_gateway_error(api_client):
-    client, mock_llm, _, _, _ = api_client
+    client, mock_llm, _, _, _, _ = api_client
 
     mock_llm.generate.side_effect = LiteLLMRequestError(
         "Gateway unavailable"
@@ -224,7 +255,7 @@ def test_generate_text_gateway_error(api_client):
 
 
 def test_generate_text_timeout(api_client):
-    client, mock_llm, _, _, _ = api_client
+    client, mock_llm, _, _, _, _ = api_client
 
     mock_llm.generate.side_effect = LiteLLMTimeoutError(
         "Request timed out"
@@ -241,8 +272,93 @@ def test_generate_text_timeout(api_client):
     )
 
 
+def test_generate_text_moderates_user_input(api_client):
+    client, mock_llm, _, _, _, mock_safety = api_client
+
+    mock_llm.generate.return_value = make_generation_response()
+
+    response = client.post(
+        "/api/v1/text/generate",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 200
+
+    mock_safety.check_input.assert_awaited_once_with("Hello")
+    mock_safety.check_output.assert_awaited_once_with(
+        "Hello from OmniAI!"
+    )
+    mock_llm.generate.assert_awaited_once()
+
+
+def test_unsafe_input_never_reaches_llm(api_client):
+    client, mock_llm, _, _, _, mock_safety = api_client
+
+    mock_safety.check_input.side_effect = UnsafeContentError(
+        ("S1",)
+    )
+
+    response = client.post(
+        "/api/v1/text/generate",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "unsafe_input"
+
+    mock_llm.generate.assert_not_awaited()
+    mock_safety.check_output.assert_not_awaited()
+
+
+def test_unsafe_output_is_not_returned(api_client):
+    client, mock_llm, usage_service, _, test_user, mock_safety = (
+        api_client
+    )
+
+    mock_llm.generate.return_value = make_generation_response(
+        content="Unsafe generated content",
+    )
+
+    mock_safety.check_output.side_effect = UnsafeContentError(
+        ("S2",)
+    )
+
+    response = client.post(
+        "/api/v1/text/generate",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 502
+    assert "Unsafe generated content" not in response.text
+
+    mock_llm.generate.assert_awaited_once()
+
+    usage_service.record_request.assert_awaited_once()
+    usage_args = usage_service.record_request.await_args.kwargs
+
+    assert usage_args["user_id"] == test_user.id
+    assert usage_args["status"] == "failed"
+    assert usage_args["error_code"] == "unsafe_model_output"
+
+
+def test_safety_provider_failure_blocks_generation(api_client):
+    client, mock_llm, _, _, _, mock_safety = api_client
+
+    mock_safety.check_input.side_effect = SafetyServiceUnavailable(
+        "Provider unavailable"
+    )
+
+    response = client.post(
+        "/api/v1/text/generate",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 503
+    mock_llm.generate.assert_not_awaited()
+
+
 def test_stream_text_success(api_client):
-    client, _, _, _, _ = api_client
+    client, _, _, _, _, mock_safety = api_client
 
     response = client.post(
         "/api/v1/text/stream",
@@ -258,8 +374,7 @@ def test_stream_text_success(api_client):
     body = response.text
 
     assert '"type": "content"' in body
-    assert '"content": "Hello"' in body
-    assert '"content": " from OmniAI"' in body
+    assert '"content": "Hello from OmniAI"' in body
 
     assert '"type": "usage"' in body
     assert '"prompt_tokens": 10' in body
@@ -269,9 +384,86 @@ def test_stream_text_success(api_client):
     assert '"type": "finish"' in body
     assert '"type": "done"' in body
 
+    mock_safety.check_input.assert_awaited_once_with("Hello")
+    mock_safety.check_output.assert_awaited_once_with(
+        "Hello from OmniAI"
+    )
+
+
+def test_stream_text_buffers_content_until_moderated(api_client):
+    client, _, _, _, _, mock_safety = api_client
+
+    def assert_output_is_safe(content):
+        assert content == "Hello from OmniAI"
+
+    mock_safety.check_output.side_effect = assert_output_is_safe
+
+    response = client.post(
+        "/api/v1/text/stream",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 200
+    assert '"content": "Hello from OmniAI"' in response.text
+
+    # The original individual chunks must not be emitted.
+    assert '"content": "Hello"' not in response.text
+    assert '"content": " from OmniAI"' not in response.text
+
+
+def test_stream_unsafe_input_never_reaches_llm(api_client):
+    client, mock_llm, _, _, _, mock_safety = api_client
+
+    mock_safety.check_input.side_effect = UnsafeContentError(
+        ("S1",)
+    )
+
+    response = client.post(
+        "/api/v1/text/stream",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 200
+    assert '"code": "unsafe_input"' in response.text
+    mock_llm.stream.assert_not_called()
+
+
+def test_stream_unsafe_output_is_not_returned(api_client):
+    client, _, _, _, _, mock_safety = api_client
+
+    mock_safety.check_output.side_effect = UnsafeContentError(
+        ("S2",)
+    )
+
+    response = client.post(
+        "/api/v1/text/stream",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 200
+    assert '"code": "unsafe_model_output"' in response.text
+    assert "Hello from OmniAI" not in response.text
+
+
+def test_stream_safety_provider_failure_blocks_output(api_client):
+    client, _, _, _, _, mock_safety = api_client
+
+    mock_safety.check_output.side_effect = SafetyServiceUnavailable(
+        "Provider unavailable"
+    )
+
+    response = client.post(
+        "/api/v1/text/stream",
+        json=valid_generation_payload(),
+    )
+
+    assert response.status_code == 200
+    assert '"code": "safety_unavailable"' in response.text
+    assert "Hello from OmniAI" not in response.text
+
 
 def test_stream_text_timeout(api_client):
-    client, mock_llm, _, _, _ = api_client
+    client, mock_llm, _, _, _, _ = api_client
 
     async def failing_stream(payload):
         raise LiteLLMTimeoutError("Request timed out")
@@ -290,7 +482,7 @@ def test_stream_text_timeout(api_client):
 
 
 def test_stream_text_gateway_error(api_client):
-    client, mock_llm, _, _, _ = api_client
+    client, mock_llm, _, _, _, _ = api_client
 
     async def failing_stream(payload):
         raise LiteLLMRequestError("Gateway unavailable")
@@ -309,15 +501,11 @@ def test_stream_text_gateway_error(api_client):
 
 
 def test_generate_text_records_usage(api_client):
-    client, mock_llm, usage_service, _, test_user = api_client
+    client, mock_llm, usage_service, _, test_user, _ = api_client
 
-    mock_llm.generate.return_value = TextGenerationResponse(
+    mock_llm.generate.return_value = make_generation_response(
         request_id="provider-request-456",
-        model="omni-primary",
         content="Usage tracking test",
-        prompt_tokens=20,
-        completion_tokens=10,
-        total_tokens=30,
     )
 
     response = client.post(
@@ -334,9 +522,9 @@ def test_generate_text_records_usage(api_client):
     assert usage_args["user_id"] == test_user.id
     assert usage_args["request_type"] == "generate"
     assert usage_args["model"] == "omni-primary"
-    assert usage_args["prompt_tokens"] == 20
-    assert usage_args["completion_tokens"] == 10
-    assert usage_args["total_tokens"] == 30
+    assert usage_args["prompt_tokens"] == 10
+    assert usage_args["completion_tokens"] == 5
+    assert usage_args["total_tokens"] == 15
     assert usage_args["status"] == "success"
     assert usage_args["provider_request_id"] == (
         "provider-request-456"
@@ -344,7 +532,7 @@ def test_generate_text_records_usage(api_client):
 
 
 def test_generate_text_records_failed_request(api_client):
-    client, mock_llm, usage_service, _, test_user = api_client
+    client, mock_llm, usage_service, _, test_user, _ = api_client
 
     mock_llm.generate.side_effect = LiteLLMRequestError(
         "Gateway unavailable"
@@ -368,7 +556,7 @@ def test_generate_text_records_failed_request(api_client):
 
 
 def test_stream_text_records_usage(api_client):
-    client, _, usage_service, _, test_user = api_client
+    client, _, usage_service, _, test_user, _ = api_client
 
     response = client.post(
         "/api/v1/text/stream",
@@ -390,15 +578,11 @@ def test_stream_text_records_usage(api_client):
 
 
 def test_usage_failure_does_not_break_generation(api_client):
-    client, mock_llm, usage_service, _, _ = api_client
+    client, mock_llm, usage_service, _, _, _ = api_client
 
-    mock_llm.generate.return_value = TextGenerationResponse(
+    mock_llm.generate.return_value = make_generation_response(
         request_id="provider-request-789",
-        model="omni-primary",
         content="Generation should still succeed",
-        prompt_tokens=10,
-        completion_tokens=5,
-        total_tokens=15,
     )
 
     usage_service.record_request.side_effect = RuntimeError(
@@ -423,15 +607,11 @@ def test_generate_text_creates_langfuse_trace(api_client):
         _,
         observability,
         _,
+        _,
     ) = api_client
 
-    mock_llm.generate.return_value = TextGenerationResponse(
+    mock_llm.generate.return_value = make_generation_response(
         request_id="provider-request-789",
-        model="omni-primary",
-        content="Hello from OmniAI!",
-        prompt_tokens=10,
-        completion_tokens=5,
-        total_tokens=15,
     )
 
     response = client.post(

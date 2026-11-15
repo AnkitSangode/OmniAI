@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     LOCAL_WHISPER_COMPUTE_TYPE: str = "int8"
     LOCAL_WHISPER_CPU_THREADS: int = 4
 
+    # AI Safety / Llama Guard
+    SAFETY_ENABLED: bool = False
+    SAFETY_PROVIDER: str = "llama_guard"
+    SAFETY_BASE_URL: str = "http://localhost:8001/v1"
+    SAFETY_API_KEY: str | None = None
+    SAFETY_MODEL: str = "meta-llama/Llama-Guard-3-1B"
+    SAFETY_TIMEOUT_SECONDS: int = 30
+
     # Langfuse Observability
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None

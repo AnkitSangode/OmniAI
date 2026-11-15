@@ -27,6 +27,12 @@ from app.services.observability.langfuse_service import (
     LangfuseService,
     get_langfuse_service,
 )
+from app.services.safety.llama_guard import LlamaGuardModerator
+from app.services.safety.safety_service import SafetyService
+from app.services.safety.schemas import (
+    SafetyServiceUnavailable,
+    UnsafeContentError,
+)
 from app.services.usage_service import UsageService
 
 logger = logging.getLogger(__name__)
@@ -54,6 +60,27 @@ def get_observability_service() -> LangfuseService:
     return get_langfuse_service()
 
 
+def get_safety_service() -> SafetyService | None:
+    settings = get_settings()
+
+    if not settings.SAFETY_ENABLED:
+        return None
+
+    if settings.SAFETY_PROVIDER != "llama_guard":
+        raise RuntimeError(
+            f"Unsupported safety provider: {settings.SAFETY_PROVIDER}"
+        )
+
+    moderator = LlamaGuardModerator(
+        base_url=settings.SAFETY_BASE_URL,
+        model=settings.SAFETY_MODEL,
+        api_key=settings.SAFETY_API_KEY,
+        timeout_seconds=settings.SAFETY_TIMEOUT_SECONDS,
+    )
+
+    return SafetyService(moderator=moderator)
+
+
 def create_sse_event(event: dict) -> str:
     """Convert an event dictionary into an SSE message."""
     return f"data: {json.dumps(event)}\n\n"
@@ -77,7 +104,6 @@ def calculate_cost_safely(
         return None
 
 
-
 def update_observability_safely(
     observability: LangfuseService,
     *,
@@ -92,7 +118,6 @@ def update_observability_safely(
     error_code: str | None = None,
 ) -> None:
     """Observability failures must not break the AI request."""
-
     try:
         observability.update_generation(
             generation=generation,
@@ -107,7 +132,6 @@ def update_observability_safely(
         )
     except Exception:
         logger.exception("Failed to update Langfuse generation.")
-
 
 
 async def record_usage_safely(
@@ -126,14 +150,7 @@ async def record_usage_safely(
     error_code: str | None = None,
 ) -> None:
     """Usage tracking must never break an otherwise successful request."""
-
     try:
-        estimated_cost = usage_service.calculate_cost(
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-
         await usage_service.record_request(
             request_id=request_id,
             provider_request_id=provider_request_id,
@@ -147,12 +164,45 @@ async def record_usage_safely(
             status=status_value,
             error_code=error_code,
         )
-
     except Exception:
         logger.exception(
             "Failed to record usage for request %s",
             request_id,
         )
+
+
+async def moderate_input(
+    safety_service: SafetyService | None,
+    payload: TextGenerationRequest,
+) -> None:
+    """Moderate user messages before they reach the LLM."""
+    if safety_service is None:
+        return
+
+    for message in payload.messages:
+        if message.role == "user":
+            await safety_service.check_input(message.content)
+
+
+def raise_safety_http_exception(exc: Exception) -> None:
+    """Translate safety exceptions into appropriate HTTP responses."""
+    if isinstance(exc, UnsafeContentError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "unsafe_input",
+                "message": "Your prompt was blocked by safety moderation.",
+                "categories": list(exc.categories),
+            },
+        ) from exc
+
+    if isinstance(exc, SafetyServiceUnavailable):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Safety moderation is temporarily unavailable.",
+        ) from exc
+
+    raise exc
 
 
 @router.post(
@@ -167,11 +217,18 @@ async def generate_text(
     llm_client: LiteLLMClient = Depends(get_llm_client),
     usage_service: UsageService = Depends(get_usage_service),
     observability: LangfuseService = Depends(get_observability_service),
+    safety_service: SafetyService | None = Depends(get_safety_service),
 ):
     request_id = str(uuid4())
     model = payload.model or llm_client.default_model
     started_at = perf_counter()
     generation = None
+
+    # Input moderation must happen before calling LiteLLM.
+    try:
+        await moderate_input(safety_service, payload)
+    except (UnsafeContentError, SafetyServiceUnavailable) as exc:
+        raise_safety_http_exception(exc)
 
     try:
         with observability.trace_generation(
@@ -182,7 +239,103 @@ async def generate_text(
         ) as generation:
             response = await llm_client.generate(payload)
 
-            latency_ms = int((perf_counter() - started_at) * 1000)
+            # Moderate the newly generated response before returning it.
+            if safety_service is not None:
+                try:
+                    await safety_service.check_output(response.content)
+                except UnsafeContentError:
+                    latency_ms = int(
+                        (perf_counter() - started_at) * 1000
+                    )
+
+                    estimated_cost = calculate_cost_safely(
+                        usage_service,
+                        model=response.model,
+                        prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens,
+                    )
+
+                    update_observability_safely(
+                        observability,
+                        generation=generation,
+                        status_value="error",
+                        request_type="generate",
+                        model=response.model,
+                        prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens,
+                        total_tokens=response.total_tokens,
+                        estimated_cost=estimated_cost,
+                        error_code="unsafe_model_output",
+                    )
+
+                    await record_usage_safely(
+                        usage_service,
+                        request_id=request_id,
+                        provider_request_id=response.request_id,
+                        user_id=current_user.id,
+                        request_type="generate",
+                        model=response.model,
+                        prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens,
+                        total_tokens=response.total_tokens,
+                        latency_ms=latency_ms,
+                        status_value="failed",
+                        error_code="unsafe_model_output",
+                    )
+
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail={
+                            "code": "unsafe_model_output",
+                            "message": (
+                                "The generated response was blocked "
+                                "by safety moderation."
+                            ),
+                        },
+                    )
+
+                except SafetyServiceUnavailable as exc:
+                    latency_ms = int(
+                        (perf_counter() - started_at) * 1000
+                    )
+
+                    update_observability_safely(
+                        observability,
+                        generation=generation,
+                        status_value="error",
+                        request_type="generate",
+                        model=response.model,
+                        prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens,
+                        total_tokens=response.total_tokens,
+                        error_code="safety_unavailable",
+                    )
+
+                    await record_usage_safely(
+                        usage_service,
+                        request_id=request_id,
+                        provider_request_id=response.request_id,
+                        user_id=current_user.id,
+                        request_type="generate",
+                        model=response.model,
+                        prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens,
+                        total_tokens=response.total_tokens,
+                        latency_ms=latency_ms,
+                        status_value="failed",
+                        error_code="safety_unavailable",
+                    )
+
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=(
+                            "Safety moderation is temporarily unavailable."
+                        ),
+                    ) from exc
+
+            latency_ms = int(
+                (perf_counter() - started_at) * 1000
+            )
 
             estimated_cost = calculate_cost_safely(
                 usage_service,
@@ -218,6 +371,9 @@ async def generate_text(
             )
 
             return response
+
+    except HTTPException:
+        raise
 
     except LiteLLMTimeoutError as exc:
         latency_ms = int((perf_counter() - started_at) * 1000)
@@ -312,6 +468,7 @@ async def stream_text(
     llm_client: LiteLLMClient = Depends(get_llm_client),
     usage_service: UsageService = Depends(get_usage_service),
     observability: LangfuseService = Depends(get_observability_service),
+    safety_service: SafetyService | None = Depends(get_safety_service),
 ):
     request_id = str(uuid4())
     model = payload.model or llm_client.default_model
@@ -327,6 +484,9 @@ async def stream_text(
         error_code = None
         generation = None
 
+        buffered_content: list[str] = []
+        pending_events: list[dict] = []
+
         with observability.trace_generation(
             request_id=request_id,
             user_id=str(current_user.id),
@@ -334,6 +494,9 @@ async def stream_text(
             model=model,
         ) as generation:
             try:
+                # Reject unsafe prompts before starting generation.
+                await moderate_input(safety_service, payload)
+
                 async for event in llm_client.stream(payload):
                     if await request.is_disconnected():
                         request_status = "cancelled"
@@ -343,10 +506,16 @@ async def stream_text(
                     event_type = event.get("type")
 
                     if event_type == "content":
-                        yield create_sse_event({
-                            "type": "content",
-                            "content": event.get("content", ""),
-                        })
+                        content = event.get("content", "")
+
+                        if safety_service is not None:
+                            # Do not expose unmoderated output.
+                            buffered_content.append(content)
+                        else:
+                            yield create_sse_event({
+                                "type": "content",
+                                "content": content,
+                            })
 
                     elif event_type == "usage":
                         prompt_tokens = event.get("prompt_tokens", 0)
@@ -355,24 +524,84 @@ async def stream_text(
                         )
                         total_tokens = event.get("total_tokens", 0)
 
-                        yield create_sse_event({
+                        usage_event = {
                             "type": "usage",
                             "prompt_tokens": prompt_tokens,
                             "completion_tokens": completion_tokens,
                             "total_tokens": total_tokens,
-                        })
+                        }
+
+                        if safety_service is not None:
+                            pending_events.append(usage_event)
+                        else:
+                            yield create_sse_event(usage_event)
 
                     elif event_type == "finish":
-                        yield create_sse_event({
+                        finish_event = {
                             "type": "finish",
                             "finish_reason": event.get("finish_reason"),
-                        })
+                        }
+
+                        if safety_service is not None:
+                            pending_events.append(finish_event)
+                        else:
+                            yield create_sse_event(finish_event)
 
                     elif event_type == "done":
+                        if safety_service is not None:
+                            complete_content = "".join(buffered_content)
+
+                            await safety_service.check_output(
+                                complete_content
+                            )
+
+                            if complete_content:
+                                yield create_sse_event({
+                                    "type": "content",
+                                    "content": complete_content,
+                                })
+
+                            for pending_event in pending_events:
+                                yield create_sse_event(pending_event)
+
                         yield create_sse_event({
                             "type": "done",
                             "request_id": request_id,
                         })
+
+            except UnsafeContentError as exc:
+                request_status = "failed"
+
+                if buffered_content:
+                    error_code = "unsafe_model_output"
+                    message = (
+                        "The generated response was blocked "
+                        "by safety moderation."
+                    )
+                else:
+                    error_code = "unsafe_input"
+                    message = (
+                        "Your prompt was blocked by safety moderation."
+                    )
+
+                yield create_sse_event({
+                    "type": "error",
+                    "message": message,
+                    "code": error_code,
+                    "categories": list(exc.categories),
+                })
+
+            except SafetyServiceUnavailable:
+                request_status = "failed"
+                error_code = "safety_unavailable"
+
+                yield create_sse_event({
+                    "type": "error",
+                    "message": (
+                        "Safety moderation is temporarily unavailable."
+                    ),
+                    "code": error_code,
+                })
 
             except LiteLLMTimeoutError:
                 request_status = "failed"
