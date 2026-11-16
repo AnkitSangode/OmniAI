@@ -19,9 +19,64 @@ from app.services.images.huggingface_provider import (
 )
 from app.services.images.image_service import ImageService
 from app.services.images.mock_provider import MockImageProvider
+from app.services.safety.llama_guard import LlamaGuardModerator
+from app.services.safety.safety_service import SafetyService
+from app.services.safety.schemas import (
+    SafetyServiceUnavailable,
+    UnsafeContentError,
+)
 from app.storage.image_storage import ImageStorageService
 
 router = APIRouter(prefix="/images", tags=["Image AI"])
+
+
+def get_image_safety_service() -> SafetyService | None:
+    """Build the configured text moderator for image prompts."""
+    settings = get_settings()
+
+    if not settings.SAFETY_ENABLED:
+        return None
+
+    if settings.SAFETY_PROVIDER != "llama_guard":
+        raise RuntimeError(
+            f"Unsupported safety provider: {settings.SAFETY_PROVIDER}"
+        )
+
+    moderator = LlamaGuardModerator(
+        base_url=settings.SAFETY_BASE_URL,
+        model=settings.SAFETY_MODEL,
+        api_key=settings.SAFETY_API_KEY,
+        timeout_seconds=settings.SAFETY_TIMEOUT_SECONDS,
+    )
+
+    return SafetyService(moderator=moderator)
+
+
+async def moderate_image_prompt(
+    safety_service: SafetyService | None,
+    prompt: str,
+) -> None:
+    """Block unsafe image prompts before invoking the image provider."""
+    if safety_service is None:
+        return
+
+    try:
+        await safety_service.check_input(prompt)
+    except UnsafeContentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "unsafe_input",
+                "message": "Your image prompt was blocked by safety moderation.",
+                "categories": list(exc.categories),
+            },
+        ) from exc
+    except SafetyServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Safety moderation is temporarily unavailable.",
+        ) from exc
+
 
 
 def get_image_service(
@@ -64,7 +119,12 @@ async def generate_image(
     request: ImageGenerationRequest,
     current_user: User = Depends(get_current_user),
     service: ImageService = Depends(get_image_service),
+    safety_service: SafetyService | None = Depends(get_image_safety_service),
 ):
+    # Moderate before calling ImageService so unsafe prompts never reach
+    # the image provider or create a generation record.
+    await moderate_image_prompt(safety_service, request.prompt)
+
     try:
         return await service.generate(
             request=request,

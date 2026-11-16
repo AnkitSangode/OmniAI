@@ -12,6 +12,7 @@ from app.schemas.image import (
 )
 from app.services.images.base import ImageProvider
 from app.storage.image_storage import ImageStorageService
+from app.services.images.watermark import ImageWatermarkService
 
 
 class ImageService:
@@ -20,11 +21,13 @@ class ImageService:
         db: AsyncSession,
         provider: ImageProvider,
         storage: ImageStorageService,
+        watermark: ImageWatermarkService | None = None,
     ):
         self.db = db
         self.repository = ImageRepository(db)
         self.provider = provider
         self.storage = storage
+        self.watermark = watermark or ImageWatermarkService()
 
     async def generate(
         self,
@@ -55,8 +58,14 @@ class ImageService:
                 height=request.height,
             )
 
+            # Apply the visible attribution before persisting the image,
+            # so both the stored file and every later download contain it.
+            watermarked_bytes = self.watermark.apply(
+                generated.image_bytes
+            )
+
             filename = await self.storage.save(
-                generated.image_bytes,
+                watermarked_bytes,
                 generation_id,
             )
 
