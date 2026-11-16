@@ -1,4 +1,3 @@
-
 from datetime import datetime
 from uuid import UUID
 
@@ -17,6 +16,7 @@ class ImageGenerationResponse(BaseModel):
     provider: str
     model: str
     status: str
+    moderation_status: str = "not_checked"
     image_url: str | None = None
     width: int
     height: int

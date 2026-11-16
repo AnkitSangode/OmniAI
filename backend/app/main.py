@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.endpoints.analytics import router as analytics_router
 from app.api.v1.endpoints import audio
 from app.api.v1.endpoints.images import router as images_router
 from app.api.v1.endpoints.prompts import router as prompts_router
@@ -55,6 +56,8 @@ app.include_router(
 )
 
 app.include_router(prompts_router, prefix="/api/v1")
+
+app.include_router(analytics_router, prefix="/api/v1")
 
 app.include_router(images_router, prefix="/api/v1")
 

@@ -18,6 +18,11 @@ from app.services.images.huggingface_provider import (
     HuggingFaceImageProvider,
 )
 from app.services.images.image_service import ImageService
+from app.services.images.image_safety import (
+    ImageSafetyService,
+    ImageSafetyUnavailable,
+    UnsafeGeneratedImageError,
+)
 from app.services.images.mock_provider import MockImageProvider
 from app.services.safety.llama_guard import LlamaGuardModerator
 from app.services.safety.safety_service import SafetyService
@@ -106,6 +111,7 @@ def get_image_service(
         db=db,
         provider=provider,
         storage=ImageStorageService(),
+        image_safety=ImageSafetyService(),
     )
 
 
@@ -130,11 +136,25 @@ async def generate_image(
             request=request,
             user_id=current_user.id,
         )
-    except Exception:
+    except UnsafeGeneratedImageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "unsafe_generated_image",
+                "message": "Generated image was blocked by safety moderation.",
+                "categories": list(exc.categories),
+            },
+        ) from exc
+    except ImageSafetyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Generated-image safety moderation is unavailable.",
+        ) from exc
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Image generation failed.",
-        )
+        ) from exc
 
 
 @router.get(
