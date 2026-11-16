@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -17,6 +18,8 @@ from app.services.llm.schemas import (
 )
 from app.services.video.ffmpeg_service import FFmpegService
 from app.storage.video_storage import VideoStorageService
+from app.services.usage_service import UsageService
+from app.services.usage_tracking import record_usage_safely
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,7 @@ class VideoService:
         llm_client: LiteLLMClient,
         ffmpeg_service: FFmpegService | None = None,
         storage: VideoStorageService | None = None,
+        usage_service: UsageService | None = None,
     ):
         self.session = session
         self.repository = VideoRepository(session)
@@ -42,6 +46,7 @@ class VideoService:
 
         self.ffmpeg = ffmpeg_service or FFmpegService()
         self.storage = storage or VideoStorageService()
+        self.usage_service = usage_service
 
         self.settings = get_settings()
 
@@ -82,6 +87,7 @@ class VideoService:
             raise ValueError("Invalid video filename.")
 
         task_id = uuid4()
+        started_at = time.perf_counter()
 
         task = VideoTask(
             id=task_id,
@@ -283,6 +289,21 @@ class VideoService:
             await self.session.commit()
             await self.session.refresh(task)
 
+            await record_usage_safely(
+                self.usage_service,
+                user_id=user_id,
+                request_id=str(task_id),
+                request_type="video",
+                model=(
+                    f"{task.transcription_provider}/{task.transcription_model}"
+                    if task.transcription_model
+                    else "ffmpeg/video-processing"
+                ),
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                status=("success" if task.status == "completed" else "failed"),
+                error_code=("optional_stage_failed" if task.status == "partially_completed" else None),
+            )
+
             return task
 
         except Exception as exc:
@@ -304,6 +325,20 @@ class VideoService:
                 existing_task.error_message = str(exc)[:2000]
 
                 await self.session.commit()
+                await record_usage_safely(
+                    self.usage_service,
+                    user_id=user_id,
+                    request_id=str(task_id),
+                    request_type="video",
+                    model=(
+                        f"{existing_task.transcription_provider}/{existing_task.transcription_model}"
+                        if existing_task.transcription_model
+                        else "ffmpeg/video-processing"
+                    ),
+                    latency_ms=int((time.perf_counter() - started_at) * 1000),
+                    status="failed",
+                    error_code=type(exc).__name__,
+                )
 
                 logger.error(
                     "Video task %s marked as failed.",
@@ -321,6 +356,16 @@ class VideoService:
 
                 if video_path and video_path.exists():
                     await self._delete_file(video_path)
+                await record_usage_safely(
+                    self.usage_service,
+                    user_id=user_id,
+                    request_id=str(task_id),
+                    request_type="video",
+                    model="ffmpeg/video-processing",
+                    latency_ms=int((time.perf_counter() - started_at) * 1000),
+                    status="failed",
+                    error_code=type(exc).__name__,
+                )
 
             raise VideoServiceError(
                 "Video processing failed."

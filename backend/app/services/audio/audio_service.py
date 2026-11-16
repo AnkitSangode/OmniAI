@@ -1,5 +1,6 @@
 
 import logging
+import time
 from pathlib import Path
 from typing import ClassVar
 from uuid import UUID
@@ -13,6 +14,8 @@ from app.services.audio.base import (
     TextToSpeechProvider,
 )
 from app.storage.audio_storage import AudioStorageService
+from app.services.usage_service import UsageService
+from app.services.usage_tracking import record_usage_safely
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +35,14 @@ class AudioService:
         stt_provider: SpeechToTextProvider,
         tts_provider: TextToSpeechProvider,
         storage: AudioStorageService,
+        usage_service: UsageService | None = None,
     ):
         self.session = session
         self.repository = AudioRepository(session)
         self.stt_provider = stt_provider
         self.tts_provider = tts_provider
         self.storage = storage
+        self.usage_service = usage_service
 
     async def transcribe(
         self,
@@ -61,6 +66,7 @@ class AudioService:
                 f"{', '.join(sorted(self.ALLOWED_EXTENSIONS))}"
             )
 
+        started_at = time.perf_counter()
         task = AudioTask(
             user_id=user_id,
             task_type="transcription",
@@ -123,6 +129,16 @@ class AudioService:
 
             await self.session.refresh(task)
 
+            await record_usage_safely(
+                self.usage_service,
+                user_id=user_id,
+                request_id=str(task.id),
+                request_type="audio",
+                model=f"{task.provider}/{task.model}",
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                status="success",
+            )
+
             logger.warning(
                 "AUDIO SERVICE: Task refreshed. Final status=%s",
                 task.status,
@@ -137,6 +153,19 @@ class AudioService:
             )
 
             await self._mark_failed(task.id, user_id, exc)
+            await record_usage_safely(
+                self.usage_service,
+                user_id=user_id,
+                request_id=str(task.id),
+                request_type="audio",
+                model=(
+                    f"{task.provider}/{task.model}"
+                    if task.model != "pending" else "audio-transcription/unknown"
+                ),
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                status="failed",
+                error_code=type(exc).__name__,
+            )
             raise
 
     async def generate_speech(
@@ -153,6 +182,7 @@ class AudioService:
         if len(cleaned_text) > 5000:
             raise ValueError("Text cannot exceed 5000 characters.")
 
+        started_at = time.perf_counter()
         task = AudioTask(
             user_id=user_id,
             task_type="speech_generation",
@@ -184,6 +214,16 @@ class AudioService:
             await self.session.commit()
             await self.session.refresh(task)
 
+            await record_usage_safely(
+                self.usage_service,
+                user_id=user_id,
+                request_id=str(task.id),
+                request_type="audio",
+                model=f"{task.provider}/{task.model}",
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                status="success",
+            )
+
             return task
 
         except Exception as exc:
@@ -193,6 +233,19 @@ class AudioService:
             )
 
             await self._mark_failed(task.id, user_id, exc)
+            await record_usage_safely(
+                self.usage_service,
+                user_id=user_id,
+                request_id=str(task.id),
+                request_type="audio",
+                model=(
+                    f"{task.provider}/{task.model}"
+                    if task.model != "pending" else "audio-speech-generation/unknown"
+                ),
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                status="failed",
+                error_code=type(exc).__name__,
+            )
             raise
 
     async def get_task(

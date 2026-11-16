@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.audio.replicate_tts_provider import ReplicateXTTSProvider
 from app.services.audio.mock_provider import MockTextToSpeechProvider
+from app.services.usage_tracking import build_usage_service
 
 from app.api.dependencies import get_current_user
 from app.core.config import get_settings
@@ -103,6 +104,7 @@ def get_audio_service(
         stt_provider,
         tts_provider,
         storage,
+        usage_service=build_usage_service(db),
     )
 
 

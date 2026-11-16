@@ -16,6 +16,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.usage_tracking import build_usage_service
 
 from app.api.dependencies import get_current_user
 from app.core.config import get_settings
@@ -98,6 +99,7 @@ def get_video_service(
         whisper_provider=whisper_provider,
         llm_client=llm_client,
         storage=VideoStorageService(),
+        usage_service=build_usage_service(db),
     )
 
 
