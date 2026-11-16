@@ -1,10 +1,9 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from app.services.safety.llama_guard import LlamaGuardModerator
-from unittest.mock import AsyncMock, MagicMock, patch
 
 
 @pytest.fixture
@@ -74,6 +73,7 @@ async def test_unsafe_classification_with_categories(moderator):
         result = await moderator.moderate(
             "Test content",
             role="assistant",
+            context="The user asked for help with this content.",
         )
 
     assert result.is_safe is False
@@ -103,7 +103,6 @@ async def test_invalid_classification_is_rejected(moderator):
         response.json.return_value = mock_response
         response.raise_for_status.return_value = None
         client.post = AsyncMock(return_value=response)
-        
 
         with pytest.raises(ValueError):
             await moderator.moderate(

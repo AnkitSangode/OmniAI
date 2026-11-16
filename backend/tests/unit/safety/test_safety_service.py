@@ -25,6 +25,7 @@ async def test_safe_input_is_accepted():
     moderator.moderate.assert_awaited_once_with(
         "Hello OmniAI",
         role="user",
+        context=None,
     )
 
 
@@ -55,11 +56,15 @@ async def test_unsafe_output_is_rejected():
     service = SafetyService(moderator)
 
     with pytest.raises(UnsafeContentError):
-        await service.check_output("Unsafe response")
+        await service.check_output(
+            "Unsafe response",
+            context="The user requested an explanation.",
+        )
 
     moderator.moderate.assert_awaited_once_with(
         "Unsafe response",
         role="assistant",
+        context="The user requested an explanation.",
     )
 
 
