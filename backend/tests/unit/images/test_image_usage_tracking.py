@@ -4,6 +4,9 @@ from uuid import uuid4
 from datetime import datetime, timezone
 
 import pytest
+from decimal import Decimal
+
+from app.services.images.image_service import ImageService
 
 from app.schemas.image import ImageGenerationRequest
 from app.services.images import image_service as module
@@ -73,3 +76,32 @@ async def test_image_generation_records_usage(monkeypatch):
     assert recorded["request_id"] == str(response.id)
     assert recorded["model"] == "mock-provider/image-v1"
     assert recorded["status"] == "success"
+
+
+
+
+def test_calculate_image_cost_with_configured_rate(monkeypatch):
+    settings = SimpleNamespace(IMAGE_GPU_HOURLY_RATE_USD=0.50)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+
+    result = ImageService._calculate_image_cost(60.0)
+
+    assert result == Decimal("0.008333333333333333333333333333")
+
+
+def test_calculate_image_cost_without_configured_rate(monkeypatch):
+    settings = SimpleNamespace(IMAGE_GPU_HOURLY_RATE_USD=None)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+
+    result = ImageService._calculate_image_cost(60.0)
+
+    assert result is None
+
+
+def test_calculate_image_cost_without_provider_timing(monkeypatch):
+    settings = SimpleNamespace(IMAGE_GPU_HOURLY_RATE_USD=0.50)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+
+    result = ImageService._calculate_image_cost(None)
+
+    assert result is None

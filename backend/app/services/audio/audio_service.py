@@ -13,9 +13,14 @@ from app.services.audio.base import (
     SpeechToTextProvider,
     TextToSpeechProvider,
 )
-from app.storage.audio_storage import AudioStorageService
+from app.services.audio.audio_validation_service import (
+    AudioValidationService,
+)
+from app.services.safety.safety_service import SafetyService
 from app.services.usage_service import UsageService
 from app.services.usage_tracking import record_usage_safely
+from app.storage.audio_storage import AudioStorageService
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,8 @@ class AudioService:
         tts_provider: TextToSpeechProvider,
         storage: AudioStorageService,
         usage_service: UsageService | None = None,
+        audio_validator: AudioValidationService | None = None,
+        safety_service: SafetyService | None = None,
     ):
         self.session = session
         self.repository = AudioRepository(session)
@@ -43,6 +50,8 @@ class AudioService:
         self.tts_provider = tts_provider
         self.storage = storage
         self.usage_service = usage_service
+        self.audio_validator = audio_validator
+        self.safety_service = safety_service
 
     async def transcribe(
         self,
@@ -52,7 +61,7 @@ class AudioService:
         content_type: str | None = None,
     ) -> AudioTask:
 
-        logger.warning("AUDIO SERVICE: Transcription request received")
+        logger.info("Audio transcription request received.")
 
         if not audio_bytes:
             raise ValueError("Audio file cannot be empty.")
@@ -66,7 +75,16 @@ class AudioService:
                 f"{', '.join(sorted(self.ALLOWED_EXTENSIONS))}"
             )
 
+        # Validate actual audio content before creating a task.
+        validator = self.audio_validator or AudioValidationService()
+
+        await validator.validate(
+            audio_bytes=audio_bytes,
+            extension=extension,
+        )
+
         started_at = time.perf_counter()
+
         task = AudioTask(
             user_id=user_id,
             task_type="transcription",
@@ -80,79 +98,64 @@ class AudioService:
         await self.repository.create(task)
         await self.session.commit()
 
-        logger.warning(
-            "AUDIO SERVICE: Task created and committed. Task ID: %s",
+        logger.info(
+            "Audio transcription task created. Task ID: %s",
             task.id,
         )
 
-        try:
-            logger.warning("AUDIO SERVICE: Calling STT provider")
+        stored_filename: str | None = None
 
+        try:
+            # Step 1: Convert audio into text.
             result = await self.stt_provider.transcribe(
                 audio_bytes=audio_bytes,
                 filename=safe_filename,
                 content_type=content_type,
             )
 
-            logger.warning(
-                "AUDIO SERVICE: STT provider returned successfully. "
-                "Provider=%s Model=%s Transcript length=%s",
+            logger.info(
+                "Transcription completed. Provider=%s Model=%s",
                 result.provider,
                 result.model,
-                len(result.text),
             )
 
-            logger.warning("AUDIO SERVICE: Saving original audio")
+            # Step 2: Moderate the transcript before storing audio
+            # or marking the task as completed.
+            if self.safety_service is not None:
+                await self.safety_service.check_input(result.text)
 
+            # Step 3: Save the original audio only after moderation.
             stored_filename = await self.storage.save(
                 audio_bytes=audio_bytes,
                 task_id=task.id,
                 extension=extension,
             )
 
-            logger.warning(
-                "AUDIO SERVICE: Audio saved: %s",
-                stored_filename,
-            )
-
+            # Step 4: Update the task.
             task.transcript = result.text
             task.provider = result.provider
             task.model = result.model
             task.audio_path = stored_filename
             task.status = "completed"
 
-            logger.warning("AUDIO SERVICE: Committing completed task")
-
+            # Critical persistence boundary.
             await self.session.commit()
-
-            logger.warning("AUDIO SERVICE: Completed task committed")
-
-            await self.session.refresh(task)
-
-            await record_usage_safely(
-                self.usage_service,
-                user_id=user_id,
-                request_id=str(task.id),
-                request_type="audio",
-                model=f"{task.provider}/{task.model}",
-                latency_ms=int((time.perf_counter() - started_at) * 1000),
-                status="success",
-            )
-
-            logger.warning(
-                "AUDIO SERVICE: Task refreshed. Final status=%s",
-                task.status,
-            )
-
-            return task
 
         except Exception as exc:
             logger.exception(
-                "AUDIO SERVICE: Transcription failed. Task ID=%s",
+                "Audio transcription failed. Task ID=%s",
                 task.id,
             )
 
-            await self._mark_failed(task.id, user_id, exc)
+            if stored_filename is not None:
+                await self._cleanup_saved_file(stored_filename)
+
+            await self._mark_failed(
+                task.id,
+                user_id,
+                exc,
+            )
+
             await record_usage_safely(
                 self.usage_service,
                 user_id=user_id,
@@ -160,13 +163,39 @@ class AudioService:
                 request_type="audio",
                 model=(
                     f"{task.provider}/{task.model}"
-                    if task.model != "pending" else "audio-transcription/unknown"
+                    if task.model != "pending"
+                    else "audio-transcription/unknown"
                 ),
-                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                latency_ms=int(
+                    (time.perf_counter() - started_at) * 1000
+                ),
                 status="failed",
                 error_code=type(exc).__name__,
             )
+
             raise
+
+        # The database commit succeeded. Preserve the file.
+        await record_usage_safely(
+            self.usage_service,
+            user_id=user_id,
+            request_id=str(task.id),
+            request_type="audio",
+            model=f"{task.provider}/{task.model}",
+            latency_ms=int(
+                (time.perf_counter() - started_at) * 1000
+            ),
+            status="success",
+        )
+
+        await self.session.refresh(task)
+
+        logger.info(
+            "Transcription task completed. Task ID=%s",
+            task.id,
+        )
+
+        return task
 
     async def generate_speech(
         self,
@@ -180,9 +209,17 @@ class AudioService:
             raise ValueError("Text cannot be empty.")
 
         if len(cleaned_text) > 5000:
-            raise ValueError("Text cannot exceed 5000 characters.")
+            raise ValueError(
+                "Text cannot exceed 5000 characters."
+            )
 
         started_at = time.perf_counter()
+
+        # Moderate before task creation. Rejected input is therefore
+        # not persisted in the audio_tasks table.
+        if self.safety_service is not None:
+            await self.safety_service.check_input(cleaned_text)
+
         task = AudioTask(
             user_id=user_id,
             task_type="speech_generation",
@@ -195,8 +232,12 @@ class AudioService:
         await self.repository.create(task)
         await self.session.commit()
 
+        stored_filename: str | None = None
+
         try:
-            result = await self.tts_provider.synthesize(cleaned_text)
+            result = await self.tts_provider.synthesize(
+                cleaned_text
+            )
 
             stored_filename = await self.storage.save(
                 audio_bytes=result.audio_bytes,
@@ -212,27 +253,22 @@ class AudioService:
             task.status = "completed"
 
             await self.session.commit()
-            await self.session.refresh(task)
-
-            await record_usage_safely(
-                self.usage_service,
-                user_id=user_id,
-                request_id=str(task.id),
-                request_type="audio",
-                model=f"{task.provider}/{task.model}",
-                latency_ms=int((time.perf_counter() - started_at) * 1000),
-                status="success",
-            )
-
-            return task
 
         except Exception as exc:
             logger.exception(
-                "AUDIO SERVICE: Speech generation failed. Task ID=%s",
+                "Speech generation failed. Task ID=%s",
                 task.id,
             )
 
-            await self._mark_failed(task.id, user_id, exc)
+            if stored_filename is not None:
+                await self._cleanup_saved_file(stored_filename)
+
+            await self._mark_failed(
+                task.id,
+                user_id,
+                exc,
+            )
+
             await record_usage_safely(
                 self.usage_service,
                 user_id=user_id,
@@ -240,19 +276,40 @@ class AudioService:
                 request_type="audio",
                 model=(
                     f"{task.provider}/{task.model}"
-                    if task.model != "pending" else "audio-speech-generation/unknown"
+                    if task.model != "pending"
+                    else "audio-speech-generation/unknown"
                 ),
-                latency_ms=int((time.perf_counter() - started_at) * 1000),
+                latency_ms=int(
+                    (time.perf_counter() - started_at) * 1000
+                ),
                 status="failed",
                 error_code=type(exc).__name__,
             )
+
             raise
+
+        await record_usage_safely(
+            self.usage_service,
+            user_id=user_id,
+            request_id=str(task.id),
+            request_type="audio",
+            model=f"{task.provider}/{task.model}",
+            latency_ms=int(
+                (time.perf_counter() - started_at) * 1000
+            ),
+            status="success",
+        )
+
+        await self.session.refresh(task)
+
+        return task
 
     async def get_task(
         self,
         task_id: UUID,
         user_id: UUID,
     ) -> AudioTask | None:
+
         return await self.repository.get_by_id(
             task_id=task_id,
             user_id=user_id,
@@ -275,33 +332,61 @@ class AudioService:
 
         return tasks, total
 
+    async def _cleanup_saved_file(
+        self,
+        filename: str,
+    ) -> None:
+        """Best-effort cleanup of a file without a committed DB reference."""
+        try:
+            await self.storage.delete(filename)
+
+            logger.info(
+                "Cleaned up uncommitted audio file: %s",
+                filename,
+            )
+
+        except Exception:
+            logger.exception(
+                "Could not clean up audio file: %s",
+                filename,
+            )
+
     async def _mark_failed(
         self,
         task_id: UUID,
         user_id: UUID,
         error: Exception,
     ) -> None:
+        """Best-effort task failure update that preserves the original error."""
+        try:
+            await self.session.rollback()
 
-        await self.session.rollback()
+            task = await self.repository.get_by_id(
+                task_id=task_id,
+                user_id=user_id,
+            )
 
-        task = await self.repository.get_by_id(
-            task_id=task_id,
-            user_id=user_id,
-        )
+            if task is None:
+                logger.error(
+                    "Could not find audio task %s to mark as failed.",
+                    task_id,
+                )
+                return
 
-        if task is None:
-            logger.error(
-                "AUDIO SERVICE: Could not find task %s to mark failed",
+            task.status = "failed"
+            task.error_message = str(error)[:2000]
+
+            await self.session.commit()
+
+            logger.info(
+                "Audio task %s marked as failed.",
                 task_id,
             )
-            return
 
-        task.status = "failed"
-        task.error_message = str(error)[:2000]
+        except Exception:
+            await self.session.rollback()
 
-        await self.session.commit()
-
-        logger.warning(
-            "AUDIO SERVICE: Task %s marked as failed",
-            task_id,
-        )
+            logger.exception(
+                "Could not mark audio task %s as failed.",
+                task_id,
+            )

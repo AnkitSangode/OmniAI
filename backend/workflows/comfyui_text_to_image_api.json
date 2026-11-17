@@ -1,0 +1,73 @@
+{
+  "4": {
+    "inputs": {
+      "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {"title": "Load Checkpoint"}
+  },
+  "5": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {"title": "Empty Latent Image"}
+  },
+  "6": {
+    "inputs": {
+      "text": ["10", 0],
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Positive Prompt"}
+  },
+  "7": {
+    "inputs": {
+      "text": "blurry, low quality, distorted, watermark, text",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Negative Prompt"}
+  },
+  "3": {
+    "inputs": {
+      "seed": 123456789,
+      "steps": 20,
+      "cfg": 7,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": ["4", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["5", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {"title": "KSampler"}
+  },
+  "8": {
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode"}
+  },
+  "9": {
+    "inputs": {
+      "filename_prefix": "OmniAI",
+      "images": ["8", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {"title": "Save Image"}
+  },
+  "10": {
+    "inputs": {
+      "value": "A cinematic photograph of a small red cabin beside a quiet lake at sunrise, detailed natural landscape, soft golden light"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {"title": "Text String (User Prompt)"}
+  }
+}

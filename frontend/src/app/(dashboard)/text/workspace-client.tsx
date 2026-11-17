@@ -231,7 +231,7 @@ export default function WorkspacePage() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Text AI Workspace</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Generate text using OmniAI's unified language model gateway.
+          Generate text using OmniAI&apos;s unified language model gateway.
         </p>
       </div>
 
@@ -419,4 +419,9 @@ export default function WorkspacePage() {
       </div>
     </section>
   );
+}
+Get-Content .env.litellm | ForEach-Object {
+    if ($_ -match '^\s*([^#][^=]*)=(.*)$') {
+        [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim().Trim('"'), "Process")
+    }
 }

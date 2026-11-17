@@ -8,6 +8,7 @@ class GeneratedImage:
     image_bytes: bytes
     provider: str
     model: str
+    provider_elapsed_seconds: float | None = None
 
 
 class ImageProvider(ABC):

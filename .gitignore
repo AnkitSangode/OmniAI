@@ -63,7 +63,6 @@ Desktop.ini
 *.sqlite3
 chroma_db/
 faiss_index/
-models/
 checkpoints/
 
 # Generated media and uploads

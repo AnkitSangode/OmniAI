@@ -34,13 +34,25 @@ async def test_transcribe_records_audio_usage(monkeypatch):
     session.rollback = AsyncMock()
 
     stt = MagicMock()
-    stt.transcribe = AsyncMock(return_value=SimpleNamespace(
-        text="hello world", provider="openai", model="whisper-1"
-    ))
+    stt.transcribe = AsyncMock(
+        return_value=SimpleNamespace(
+            text="hello world", provider="openai", model="whisper-1"
+        )
+    )
     usage = MagicMock()
     usage.record_request = AsyncMock()
 
-    service = module.AudioService(session, stt, MagicMock(), FakeStorage(), usage)
+    validator = MagicMock()
+    validator.validate = AsyncMock()
+
+    service = module.AudioService(
+        session,
+        stt,
+        MagicMock(),
+        FakeStorage(),
+        usage,
+        audio_validator=validator,
+    )
     user_id = uuid4()
 
     task = await service.transcribe(user_id, b"audio-bytes", "sample.wav", "audio/wav")
@@ -52,6 +64,10 @@ async def test_transcribe_records_audio_usage(monkeypatch):
     assert recorded["request_id"] == str(task.id)
     assert recorded["model"] == "openai/whisper-1"
     assert recorded["status"] == "success"
+    validator.validate.assert_awaited_once_with(
+        audio_bytes=b"audio-bytes",
+        extension="wav",
+    )
 
 
 @pytest.mark.asyncio
@@ -63,10 +79,16 @@ async def test_generate_speech_records_audio_usage(monkeypatch):
     session.rollback = AsyncMock()
 
     tts = MagicMock()
-    tts.synthesize = AsyncMock(return_value=SimpleNamespace(
-        audio_bytes=b"generated", extension="mp3", provider="coqui", model="xtts-v2",
-        content_type="audio/mpeg", duration_seconds=2.5,
-    ))
+    tts.synthesize = AsyncMock(
+        return_value=SimpleNamespace(
+            audio_bytes=b"generated",
+            extension="mp3",
+            provider="coqui",
+            model="xtts-v2",
+            content_type="audio/mpeg",
+            duration_seconds=2.5,
+        )
+    )
     usage = MagicMock()
     usage.record_request = AsyncMock()
 
@@ -87,7 +109,9 @@ async def test_transcribe_rejects_empty_audio_before_tracking(monkeypatch):
     monkeypatch.setattr(module, "AudioRepository", FakeRepository)
     usage = MagicMock()
     usage.record_request = AsyncMock()
-    service = module.AudioService(MagicMock(), MagicMock(), MagicMock(), FakeStorage(), usage)
+    service = module.AudioService(
+        MagicMock(), MagicMock(), MagicMock(), FakeStorage(), usage
+    )
 
     with pytest.raises(ValueError, match="cannot be empty"):
         await service.transcribe(uuid4(), b"", "sample.wav")

@@ -1,4 +1,6 @@
 
+"""Usage analytics and cost calculation service."""
+
 import logging
 import uuid
 from decimal import Decimal
@@ -25,6 +27,7 @@ class UsageService:
         prompt_tokens: int,
         completion_tokens: int,
     ) -> Decimal | None:
+        """Calculate LLM cost using configured per-million-token rates."""
         pricing = self.model_pricing.get(model)
 
         if not pricing:
@@ -39,13 +42,13 @@ class UsageService:
         input_cost = (
             Decimal(prompt_tokens)
             * Decimal(str(input_rate))
-            / Decimal(1000000)
+            / Decimal(1_000_000)
         )
 
         output_cost = (
             Decimal(completion_tokens)
             * Decimal(str(output_rate))
-            / Decimal(1000000)
+            / Decimal(1_000_000)
         )
 
         return input_cost + output_cost
@@ -64,15 +67,23 @@ class UsageService:
         total_tokens: int = 0,
         provider_request_id: str | None = None,
         error_code: str | None = None,
+        estimated_cost_override: Decimal | None = None,
     ) -> UsageRecord:
+        """Persist usage metrics and an optional externally calculated cost."""
+
         estimated_cost = None
 
         if status == "success":
-            estimated_cost = self.calculate_cost(
-                model=model,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
+            if estimated_cost_override is not None:
+                # Used by services with non-token pricing, such as image generation.
+                estimated_cost = estimated_cost_override
+            else:
+                # Default behavior remains token-based LLM pricing.
+                estimated_cost = self.calculate_cost(
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
 
         record = UsageRecord(
             request_id=request_id,

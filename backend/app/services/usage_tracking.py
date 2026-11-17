@@ -1,5 +1,8 @@
+
 """Best-effort usage tracking shared by non-text AI services."""
+
 import logging
+from decimal import Decimal
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +17,7 @@ logger = logging.getLogger(__name__)
 def build_usage_service(session: AsyncSession) -> UsageService:
     """Create a UsageService using the application's configured pricing."""
     settings = get_settings()
+
     return UsageService(
         repository=UsageRepository(session=session),
         model_pricing=settings.LLM_MODEL_PRICING,
@@ -34,12 +38,14 @@ async def record_usage_safely(
     completion_tokens: int = 0,
     total_tokens: int = 0,
     provider_request_id: str | None = None,
+    estimated_cost_override: Decimal | None = None,
 ) -> None:
     """Persist analytics without allowing telemetry to break user work.
 
-    Call this only after the task's own transaction has been committed. The
-    UsageService owns its commit/rollback for the usage record.
+    Call this only after the task's own transaction has been committed.
+    The UsageService owns its commit/rollback for the usage record.
     """
+
     if usage_service is None:
         return
 
@@ -56,9 +62,12 @@ async def record_usage_safely(
             total_tokens=total_tokens,
             provider_request_id=provider_request_id,
             error_code=error_code,
+            estimated_cost_override=estimated_cost_override,
         )
+
     except Exception:
         logger.exception(
-            "Usage tracking failed for request %s; application operation remains unaffected.",
+            "Usage tracking failed for request %s; "
+            "application operation remains unaffected.",
             request_id,
         )

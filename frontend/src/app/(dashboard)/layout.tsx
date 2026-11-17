@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Mic,
   Video,
+  BookOpen,
   Sparkles,
   LogOut,
   UserCircle,
@@ -43,6 +44,11 @@ const navigation = [
     name: "Video AI",
     href: "/video",
     icon: Video,
+  },
+  {
+    name: "Prompt Library",
+    href: "/prompts",
+    icon: BookOpen,
   },
 ];
 

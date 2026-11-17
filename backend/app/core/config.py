@@ -29,22 +29,28 @@ class Settings(BaseSettings):
     IMAGE_INFERENCE_TIMEOUT_SECONDS: int = 180
     IMAGE_BACKEND: str = "mock"
 
+    # ComfyUI image generation
+    COMFYUI_BASE_URL: str | None = None
+    COMFYUI_API_KEY: str | None = None
+    COMFYUI_WORKFLOW_PATH: str = "workflows/comfyui_text_to_image_api.json"
+    COMFYUI_TIMEOUT_SECONDS: int = 600
+    COMFYUI_POLL_INTERVAL_SECONDS: float = 2.0
+
     # Audio storage and providers
     AUDIO_STORAGE_DIR: str = "storage/audio"
     AUDIO_BACKEND: str = "real"
 
     WHISPER_PROVIDER: str = "huggingface"
     WHISPER_MODEL_ID: str = "openai/whisper-large-v3"
-    HF_TOKEN: str | None = None
 
-    TTS_PROVIDER: str = "replicate"
-    TTS_MODEL_ID: str = "lucataco/xtts-v2"
-    REPLICATE_API_TOKEN: str | None = None
-    TTS_SPEAKER_URL: str = (
-    "https://replicate.delivery/pbxt/Jt79w0xsT64R1JsiJ0LQRL8UcWspg5J4RFrU6YwEKpOT1ukS/male.wav"
-    )
-    TTS_LANGUAGE: str = "en"
-    TTS_CLEANUP_VOICE: bool = False
+    # Text-to-Speech
+    TTS_PROVIDER: str = "kokoro"
+    TTS_MODEL_ID: str = "hexgrad/Kokoro-82M"
+    TTS_LANGUAGE: str = "en-us"
+    TTS_VOICE: str = "af_heart"
+    TTS_SPEED: float = 1.0
+    TTS_DEVICE: str = "cpu"
+    TTS_TIMEOUT_SECONDS: int = 600
 
     AUDIO_INFERENCE_TIMEOUT_SECONDS: int = 180
 
@@ -52,13 +58,16 @@ class Settings(BaseSettings):
     VIDEO_STORAGE_DIR: str = "storage/videos"
     FFMPEG_TIMEOUT_SECONDS: int = 300
     MAX_VIDEO_DURATION_SECONDS: int = 1800
-    VIDEO_STORAGE_DIR: str = "storage/videos"
 
 
     LOCAL_WHISPER_MODEL: str = "base"
     LOCAL_WHISPER_DEVICE: str = "cpu"
     LOCAL_WHISPER_COMPUTE_TYPE: str = "int8"
     LOCAL_WHISPER_CPU_THREADS: int = 4
+
+    # Image infrastructure pricing
+    IMAGE_GPU_HOURLY_RATE_USD: float | None = None
+    
 
     # AI Safety / Llama Guard
     SAFETY_ENABLED: bool = False

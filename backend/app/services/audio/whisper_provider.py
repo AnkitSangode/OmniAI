@@ -1,5 +1,6 @@
 
 import asyncio
+import logging
 
 from huggingface_hub import InferenceClient
 
@@ -7,6 +8,8 @@ from app.services.audio.base import (
     SpeechToTextProvider,
     TranscriptionResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class HuggingFaceWhisperProvider(SpeechToTextProvider):
@@ -20,6 +23,9 @@ class HuggingFaceWhisperProvider(SpeechToTextProvider):
     ):
         if not token:
             raise ValueError("Hugging Face token is required.")
+
+        if timeout <= 0:
+            raise ValueError("Timeout must be greater than zero.")
 
         self.token = token
         self.model = model
@@ -35,11 +41,31 @@ class HuggingFaceWhisperProvider(SpeechToTextProvider):
             raise ValueError("Audio file cannot be empty.")
 
         try:
-            output = await asyncio.to_thread(
-                self._transcribe_sync,
-                audio_bytes,
+            output = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._transcribe_sync,
+                    audio_bytes,
+                ),
+                timeout=self.timeout,
             )
+
+        except TimeoutError as exc:
+            logger.error(
+                "Hugging Face transcription timed out after %s seconds.",
+                self.timeout,
+            )
+            raise RuntimeError(
+                "Hugging Face Whisper transcription timed out."
+            ) from exc
+
+        except asyncio.CancelledError:
+            logger.info("Hugging Face transcription was cancelled.")
+            raise
+
         except Exception as exc:
+            logger.exception(
+                "Hugging Face Whisper transcription failed."
+            )
             raise RuntimeError(
                 "Hugging Face Whisper transcription failed."
             ) from exc
