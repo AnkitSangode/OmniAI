@@ -1,46 +1,25 @@
+# OmniAI LiteLLM Proxy Configuration
+# Free-first inference: local Qwen primary, Gemini hosted fallback.
 
 model_list:
-  # ==========================================
-  # 1. Primary: OpenAI
-  # ==========================================
+  # Primary: Local Qwen via Ollama (no per-request API charge)
   - model_name: omni-primary
     litellm_params:
-      model: openai/gpt-4o-mini
-      api_key: os.environ/OPENAI_API_KEY
+      model: ollama_chat/qwen2.5:1.5b
+      api_base: http://localhost:11434
 
-  # ==========================================
-  # 2. Fallback: Google Gemini
-  # ==========================================
+  # Fallback: Gemini (subject to Google AI free-tier quotas and limits)
   - model_name: omni-gemini-fallback
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
 
-  # ==========================================
-  # 3. Local: Ollama (Free CPU Inference)
-  # ==========================================
-  - model_name: omni-local
-    litellm_params:
-      model: ollama_chat/qwen2.5:1.5b
-      api_base: http://localhost:11434
-
-# ==========================================
-# LiteLLM Proxy Settings
-# ==========================================
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/LITELLM_DATABASE_URL
 
-# ==========================================
-# Retry Settings
-# ==========================================
-litellm_settings:
-  num_retries: 1
-
-# ==========================================
-# Fallback Configuration
-# ==========================================
 router_settings:
+  num_retries: 1
   fallbacks:
     - omni-primary:
         - omni-gemini-fallback

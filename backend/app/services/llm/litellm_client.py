@@ -13,6 +13,10 @@ from app.services.llm.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Keep diagnostic response bodies bounded. Provider errors should be useful
+# for debugging, but we should not dump arbitrary large responses into logs.
+_MAX_ERROR_BODY_LENGTH = 2000
+
 
 class LiteLLMError(Exception):
     """Base exception for LiteLLM gateway failures."""
@@ -26,9 +30,27 @@ class LiteLLMRequestError(LiteLLMError):
     """Raised when the gateway returns an unsuccessful response."""
 
 
+def _get_error_body(response: httpx.Response) -> str:
+    """Return a bounded response body for diagnostics."""
+    try:
+        body = response.text.strip()
+    except Exception:
+        return "<response body unavailable>"
+
+    if not body:
+        return "<empty response body>"
+
+    if len(body) > _MAX_ERROR_BODY_LENGTH:
+        return body[:_MAX_ERROR_BODY_LENGTH] + "...<truncated>"
+
+    return body
+
+
 class LiteLLMClient:
     def __init__(self, settings: Settings) -> None:
-        self.base_url = str(settings.LITELLM_BASE_URL).rstrip("/")
+        # Keep /v1 (or any configured API prefix) in the base URL.
+        # Requests below use relative paths without a leading slash.
+        self.base_url = str(settings.LITELLM_BASE_URL).rstrip("/") + "/"
         self.api_key = settings.LITELLM_API_KEY
         self.timeout = settings.LITELLM_TIMEOUT_SECONDS
         self.default_model = settings.LITELLM_DEFAULT_MODEL
@@ -42,51 +64,78 @@ class LiteLLMClient:
             },
         )
 
-    async def generate(
+    def _build_payload(
         self,
         request: TextGenerationRequest,
-    ) -> TextGenerationResponse:
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model or self.default_model,
-            "messages": [message.model_dump() for message in request.messages],
+            "messages": [
+                message.model_dump() for message in request.messages
+            ],
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
 
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
+
+        return payload
+
+    async def generate(
+        self,
+        request: TextGenerationRequest,
+    ) -> TextGenerationResponse:
+        payload = self._build_payload(request)
+
         try:
             response = await self._client.post(
-                "/chat/completions",
+                "chat/completions",
                 json=payload,
             )
             response.raise_for_status()
 
         except httpx.TimeoutException as exc:
-            logger.warning("LiteLLM request timed out")
+            logger.exception(
+                "LiteLLM request timed out. Base URL: %s | Model: %s",
+                self.base_url,
+                payload["model"],
+            )
             raise LiteLLMTimeoutError(
                 "The AI provider took too long to respond."
             ) from exc
 
         except httpx.HTTPStatusError as exc:
+            error_body = _get_error_body(exc.response)
             logger.error(
-                "LiteLLM returned HTTP %s",
+                "LiteLLM request failed. Status: %s | URL: %s | Model: %s "
+                "| Response: %s",
                 exc.response.status_code,
+                exc.request.url,
+                payload["model"],
+                error_body,
             )
             raise LiteLLMRequestError(
                 "The AI gateway could not process the request."
             ) from exc
 
         except httpx.RequestError as exc:
-            logger.error("Could not connect to LiteLLM: %s", exc)
+            logger.exception(
+                "Could not connect to LiteLLM. Base URL: %s | Model: %s",
+                self.base_url,
+                payload["model"],
+            )
             raise LiteLLMRequestError(
                 "The AI gateway is currently unavailable."
             ) from exc
 
-        data = response.json()
-
         try:
+            data = response.json()
             choice = data["choices"][0]
             usage = data.get("usage") or {}
-
             content = choice["message"]["content"]
 
             if not isinstance(content, str):
@@ -101,32 +150,28 @@ class LiteLLMClient:
                 total_tokens=usage.get("total_tokens", 0),
             )
 
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            logger.exception("Invalid response received from LiteLLM")
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.exception(
+                "Invalid response received from LiteLLM. Model: %s | "
+                "Status: %s | Response: %s",
+                payload["model"],
+                response.status_code,
+                _get_error_body(response),
+            )
             raise LiteLLMRequestError(
                 "The AI gateway returned an invalid response."
             ) from exc
-
-    async def close(self) -> None:
-        await self._client.aclose()
 
     async def stream(
         self,
         request: TextGenerationRequest,
     ) -> AsyncIterator[dict[str, Any]]:
-        payload: dict[str, Any] = {
-            "model": request.model or self.default_model,
-            "messages": [message.model_dump() for message in request.messages],
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
+        payload = self._build_payload(request, stream=True)
 
         try:
             async with self._client.stream(
                 "POST",
-                "/chat/completions",
+                "chat/completions",
                 json=payload,
             ) as response:
                 response.raise_for_status()
@@ -135,7 +180,7 @@ class LiteLLMClient:
                     if not line or not line.startswith("data:"):
                         continue
 
-                    data = line[len("data:") :].strip()
+                    data = line[len("data:"):].strip()
 
                     if data == "[DONE]":
                         yield {"type": "done"}
@@ -144,17 +189,38 @@ class LiteLLMClient:
                     try:
                         chunk = json.loads(data)
                     except json.JSONDecodeError as exc:
+                        logger.error(
+                            "Invalid JSON in LiteLLM stream. Model: %s | "
+                            "Data: %s",
+                            payload["model"],
+                            data[:_MAX_ERROR_BODY_LENGTH],
+                        )
                         raise LiteLLMRequestError(
                             "Invalid streaming response from gateway."
                         ) from exc
 
-                    usage = chunk.get("usage")
+                    # Some OpenAI-compatible providers may send an error
+                    # object inside an otherwise HTTP-200 SSE response.
+                    if chunk.get("error"):
+                        error = chunk["error"]
+                        logger.error(
+                            "LiteLLM returned an in-stream error. Model: %s "
+                            "| Error: %s",
+                            payload["model"],
+                            str(error)[:_MAX_ERROR_BODY_LENGTH],
+                        )
+                        raise LiteLLMRequestError(
+                            "The AI gateway returned a streaming error."
+                        )
 
+                    usage = chunk.get("usage")
                     if usage:
                         yield {
                             "type": "usage",
                             "prompt_tokens": usage.get("prompt_tokens", 0),
-                            "completion_tokens": usage.get("completion_tokens", 0),
+                            "completion_tokens": usage.get(
+                                "completion_tokens", 0
+                            ),
                             "total_tokens": usage.get("total_tokens", 0),
                         }
 
@@ -168,25 +234,48 @@ class LiteLLMClient:
                                 "content": content,
                             }
 
-                        if choice.get("finish_reason"):
+                        finish_reason = choice.get("finish_reason")
+                        if finish_reason:
                             yield {
                                 "type": "finish",
-                                "reason": choice["finish_reason"],
+                                "finish_reason": finish_reason,
                             }
 
         except httpx.TimeoutException as exc:
-            raise LiteLLMTimeoutError("The AI provider timed out.") from exc
+            logger.exception(
+                "LiteLLM streaming request timed out. Base URL: %s | "
+                "Model: %s",
+                self.base_url,
+                payload["model"],
+            )
+            raise LiteLLMTimeoutError(
+                "The AI provider timed out."
+            ) from exc
 
         except httpx.HTTPStatusError as exc:
+            error_body = _get_error_body(exc.response)
             logger.error(
-                "LiteLLM streaming request failed with HTTP %s",
+                "LiteLLM streaming request failed. Status: %s | URL: %s "
+                "| Model: %s | Response: %s",
                 exc.response.status_code,
+                exc.request.url,
+                payload["model"],
+                error_body,
             )
             raise LiteLLMRequestError(
                 "The AI gateway could not process the streaming request."
             ) from exc
 
         except httpx.RequestError as exc:
+            logger.exception(
+                "Could not connect to LiteLLM for streaming. "
+                "Base URL: %s | Model: %s",
+                self.base_url,
+                payload["model"],
+            )
             raise LiteLLMRequestError(
                 "The AI gateway is currently unavailable."
             ) from exc
+
+    async def close(self) -> None:
+        await self._client.aclose()

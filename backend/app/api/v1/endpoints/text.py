@@ -1,6 +1,7 @@
 
 import json
 import logging
+import re
 from time import perf_counter
 from uuid import uuid4
 
@@ -392,6 +393,12 @@ async def generate_text(
         raise
 
     except LiteLLMTimeoutError as exc:
+        logger.exception(
+            "LiteLLM generation timed out. Request ID: %s | Model: %s | Error: %s",
+            request_id,
+            model,
+            str(exc),
+        )
         latency_ms = int((perf_counter() - started_at) * 1000)
 
         update_observability_safely(
@@ -420,6 +427,12 @@ async def generate_text(
         ) from exc
 
     except LiteLLMRequestError as exc:
+        logger.exception(
+            "LiteLLM request error. Request ID: %s | Model: %s | Error: %s",
+            request_id,
+            model,
+            str(exc),
+        )
         latency_ms = int((perf_counter() - started_at) * 1000)
 
         update_observability_safely(
@@ -448,6 +461,12 @@ async def generate_text(
         ) from exc
 
     except LiteLLMError as exc:
+        logger.exception(
+            "LiteLLM generation error. Request ID: %s | Model: %s | Error: %s",
+            request_id,
+            model,
+            str(exc),
+        )
         latency_ms = int((perf_counter() - started_at) * 1000)
 
         update_observability_safely(
@@ -501,8 +520,12 @@ async def stream_text(
         error_code = None
         generation = None
 
-        buffered_content: list[str] = []
-        pending_events: list[dict] = []
+        # With output moderation enabled, keep only the unfinished sentence
+        # in memory. Completed windows are checked before being sent to the
+        # client, rather than buffering the entire response until [DONE].
+        moderation_buffer = ""
+        approved_context = ""
+        output_moderation_started = False
 
         with observability.trace_generation(
             request_id=request_id,
@@ -525,14 +548,52 @@ async def stream_text(
                     if event_type == "content":
                         content = event.get("content", "")
 
-                        if safety_service is not None:
-                            # Do not expose unmoderated output.
-                            buffered_content.append(content)
-                        else:
+                        if not content:
+                            continue
+
+                        if safety_service is None:
                             yield create_sse_event({
                                 "type": "content",
                                 "content": content,
                             })
+                            continue
+
+                        moderation_buffer += content
+
+                        # Release complete sentences as soon as possible.
+                        # The length fallback prevents a very long sentence
+                        # (or text without punctuation) from being held forever.
+                        while True:
+                            match = re.search(r"[.!?。！？](?:[\"'”’\)\]\}]+)?(?:\s+|$)", moderation_buffer)
+                            if match:
+                                split_at = match.end()
+                            elif len(moderation_buffer) >= 500:
+                                split_at = moderation_buffer.rfind(" ", 0, 500)
+                                if split_at <= 0:
+                                    split_at = 500
+                            else:
+                                break
+
+                            moderation_window = moderation_buffer[:split_at]
+                            moderation_buffer = moderation_buffer[split_at:]
+
+                            moderation_context = "\n".join(
+                                part for part in (user_message, approved_context)
+                                if part
+                            )
+                            output_moderation_started = True
+                            await safety_service.check_output(
+                                moderation_window,
+                                context=moderation_context or None,
+                            )
+
+                            yield create_sse_event({
+                                "type": "content",
+                                "content": moderation_window,
+                            })
+                            approved_context = (
+                                approved_context + moderation_window
+                            )[-2000:]
 
                     elif event_type == "usage":
                         prompt_tokens = event.get("prompt_tokens", 0)
@@ -541,46 +602,36 @@ async def stream_text(
                         )
                         total_tokens = event.get("total_tokens", 0)
 
-                        usage_event = {
+                        yield create_sse_event({
                             "type": "usage",
                             "prompt_tokens": prompt_tokens,
                             "completion_tokens": completion_tokens,
                             "total_tokens": total_tokens,
-                        }
-
-                        if safety_service is not None:
-                            pending_events.append(usage_event)
-                        else:
-                            yield create_sse_event(usage_event)
+                        })
 
                     elif event_type == "finish":
-                        finish_event = {
+                        yield create_sse_event({
                             "type": "finish",
                             "finish_reason": event.get("finish_reason"),
-                        }
-
-                        if safety_service is not None:
-                            pending_events.append(finish_event)
-                        else:
-                            yield create_sse_event(finish_event)
+                        })
 
                     elif event_type == "done":
-                        if safety_service is not None:
-                            complete_content = "".join(buffered_content)
-
-                            await safety_service.check_output(
-                                complete_content,
-                                context=user_message,
+                        # The final fragment may not end with punctuation.
+                        if safety_service is not None and moderation_buffer:
+                            moderation_context = "\n".join(
+                                part for part in (user_message, approved_context)
+                                if part
                             )
-
-                            if complete_content:
-                                yield create_sse_event({
-                                    "type": "content",
-                                    "content": complete_content,
-                                })
-
-                            for pending_event in pending_events:
-                                yield create_sse_event(pending_event)
+                            output_moderation_started = True
+                            await safety_service.check_output(
+                                moderation_buffer,
+                                context=moderation_context or None,
+                            )
+                            yield create_sse_event({
+                                "type": "content",
+                                "content": moderation_buffer,
+                            })
+                            moderation_buffer = ""
 
                         yield create_sse_event({
                             "type": "done",
@@ -590,10 +641,10 @@ async def stream_text(
             except UnsafeContentError as exc:
                 request_status = "failed"
 
-                if buffered_content:
+                if output_moderation_started:
                     error_code = "unsafe_model_output"
                     message = (
-                        "The generated response was blocked "
+                        "A generated response segment was blocked "
                         "by safety moderation."
                     )
                 else:
@@ -621,7 +672,13 @@ async def stream_text(
                     "code": error_code,
                 })
 
-            except LiteLLMTimeoutError:
+            except LiteLLMTimeoutError as exc:
+                logger.exception(
+                    "LiteLLM streaming timeout. Request ID: %s | Model: %s | Error: %s",
+                    request_id,
+                    model,
+                    str(exc),
+                )
                 request_status = "failed"
                 error_code = "llm_timeout"
 
@@ -631,7 +688,13 @@ async def stream_text(
                     "code": error_code,
                 })
 
-            except LiteLLMRequestError:
+            except LiteLLMRequestError as exc:
+                logger.exception(
+                    "LiteLLM streaming request error. Request ID: %s | Model: %s | Error: %s",
+                    request_id,
+                    model,
+                    str(exc),
+                )
                 request_status = "failed"
                 error_code = "llm_gateway_error"
 
@@ -641,7 +704,13 @@ async def stream_text(
                     "code": error_code,
                 })
 
-            except LiteLLMError:
+            except LiteLLMError as exc:
+                logger.exception(
+                    "LiteLLM streaming error. Request ID: %s | Model: %s | Error: %s",
+                    request_id,
+                    model,
+                    str(exc),
+                )
                 request_status = "failed"
                 error_code = "llm_gateway_error"
 

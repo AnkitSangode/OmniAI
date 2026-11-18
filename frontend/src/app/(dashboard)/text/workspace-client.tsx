@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useRef, useState } from "react";
@@ -20,6 +19,57 @@ type GenerationResult = {
   completion_tokens: number;
   total_tokens: number;
 };
+
+type ApiErrorBody = {
+  detail?: unknown;
+  message?: unknown;
+};
+
+type StreamEvent = {
+  type?: string;
+  content?: unknown;
+  message?: unknown;
+  code?: unknown;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  request_id?: string;
+  model?: string;
+  finish_reason?: string;
+  reason?: string;
+};
+
+function getErrorMessage(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+
+  if (value && typeof value === "object") {
+    const candidate = value as {
+      message?: unknown;
+      detail?: unknown;
+    };
+
+    if (typeof candidate.message === "string" && candidate.message.trim()) {
+      return candidate.message;
+    }
+
+    if (typeof candidate.detail === "string" && candidate.detail.trim()) {
+      return candidate.detail;
+    }
+
+    if (
+      candidate.detail &&
+      typeof candidate.detail === "object" &&
+      "message" in candidate.detail &&
+      typeof (candidate.detail as { message?: unknown }).message === "string"
+    ) {
+      return (candidate.detail as { message: string }).message;
+    }
+  }
+
+  return fallback;
+}
 
 export default function WorkspacePage() {
   const [prompt, setPrompt] = useState("");
@@ -54,7 +104,7 @@ export default function WorkspacePage() {
     return true;
   };
 
-  // Standard, non-streaming generation
+  // Standard, non-streaming generation.
   const generateText = async () => {
     if (!validatePrompt()) return;
 
@@ -83,17 +133,28 @@ export default function WorkspacePage() {
         total_tokens: result.total_tokens,
       });
     } catch (err: unknown) {
-      const message =
-        (err as { response?: { data?: { detail?: string } } })?.response
-          ?.data?.detail;
+      const responseData = (
+        err as {
+          response?: {
+            data?: ApiErrorBody;
+          };
+        }
+      )?.response?.data;
 
-      setError(message || "Text generation failed. Please try again.");
+      const errorValue = responseData?.detail ?? responseData?.message;
+
+      setError(
+        getErrorMessage(
+          errorValue,
+          "Text generation failed. Please try again."
+        )
+      );
     } finally {
       setIsGenerating(false);
     }
   };
 
-  // Streaming generation
+  // Streaming generation using Server-Sent Events (SSE).
   const generateStream = async () => {
     if (!validatePrompt()) return;
 
@@ -113,6 +174,7 @@ export default function WorkspacePage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "text/event-stream",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
@@ -122,16 +184,20 @@ export default function WorkspacePage() {
           max_tokens: maxTokens,
         }),
         signal: controller.signal,
+        cache: "no-store",
       });
 
       if (!response.ok) {
         let message = "Streaming generation failed.";
 
         try {
-          const data = await response.json();
-          message = data.detail || message;
+          const data: ApiErrorBody = await response.json();
+          message = getErrorMessage(
+            data.detail ?? data.message,
+            message
+          );
         } catch {
-          // Keep the fallback message.
+          // Keep the fallback message if the error response isn't JSON.
         }
 
         throw new Error(message);
@@ -141,25 +207,55 @@ export default function WorkspacePage() {
         throw new Error("Streaming is not supported by this response.");
       }
 
+      const contentType = response.headers.get("content-type") ?? "";
+      if (
+        contentType &&
+        !contentType.includes("text/event-stream") &&
+        !contentType.includes("application/octet-stream")
+      ) {
+        console.warn("Unexpected streaming response content type:", contentType);
+      }
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
 
       let buffer = "";
       let accumulatedText = "";
 
-      const processEvent = (event: string) => {
-        const dataLines = event
-          .split("\n")
+      const processEvent = (rawEvent: string) => {
+        // Ignore empty events and SSE comment/heartbeat events.
+        if (!rawEvent.trim() || rawEvent.trimStart().startsWith(":")) {
+          return;
+        }
+
+        const dataLines = rawEvent
+          .split(/\r?\n/)
           .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim());
+          .map((line) => line.slice(5).replace(/^ /, ""));
 
-        if (!dataLines.length) return;
+        if (dataLines.length === 0) return;
 
-        const data = JSON.parse(dataLines.join("\n"));
+        const eventData = dataLines.join("\n");
+
+        if (eventData.trim() === "[DONE]") {
+          return;
+        }
+
+        let data: StreamEvent;
+
+        try {
+          data = JSON.parse(eventData) as StreamEvent;
+        } catch (parseError) {
+          console.error("Unable to parse SSE event:", eventData, parseError);
+          throw new Error("Received an invalid streaming event from the server.");
+        }
+
+        console.debug("Received SSE event:", data);
 
         if (data.type === "content" && typeof data.content === "string") {
           accumulatedText += data.content;
           setOutput(accumulatedText);
+          return;
         }
 
         if (data.type === "usage") {
@@ -168,52 +264,77 @@ export default function WorkspacePage() {
             completion_tokens: data.completion_tokens ?? 0,
             total_tokens: data.total_tokens ?? 0,
           });
+          return;
         }
 
         if (data.type === "finish") {
           if (data.model) setUsedModel(data.model);
           if (data.request_id) setRequestId(data.request_id);
-        }
-
-        if (data.type === "error") {
-          throw new Error(
-            data.message || "The AI generation service encountered an error."
-          );
+          return;
         }
 
         if (data.type === "done") {
           if (data.request_id) setRequestId(data.request_id);
           if (data.model) setUsedModel(data.model);
+          return;
         }
+
+        if (data.type === "error") {
+          throw new Error(
+            getErrorMessage(
+              data.message,
+              "The AI generation service encountered an error."
+            )
+          );
+        }
+
+        // Log unrecognized event shapes so the SSE contract can be diagnosed.
+        console.debug("Ignoring unhandled SSE event:", data);
       };
 
       while (true) {
         const { value, done } = await reader.read();
 
-        if (done) break;
+        if (done) {
+          // Flush any bytes still held by the decoder.
+          buffer += decoder.decode();
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
 
-        const events = buffer.split(/\r?\n\r?\n/);
-        buffer = events.pop() || "";
+        // An SSE event is terminated by a blank line. A network chunk may
+        // contain part of an event or several complete events.
+        const events = buffer.split(/\r\n\r\n|\n\n|\r\r/);
+        buffer = events.pop() ?? "";
 
         for (const event of events) {
-          if (event.trim()) processEvent(event);
+          processEvent(event);
         }
       }
 
-      // Process any final event left in the buffer.
+      // Process a final event that wasn't followed by a blank line.
       if (buffer.trim()) {
         processEvent(buffer);
       }
+
+      if (!accumulatedText) {
+        console.warn(
+          "The stream completed without any content events. Check the SSE event types in the browser console."
+        );
+      }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") {
+      if (
+        err instanceof Error &&
+        (err.name === "AbortError" || controller.signal.aborted)
+      ) {
         setError("Generation stopped.");
       } else {
         setError(
-          err instanceof Error
-            ? err.message
-            : "Streaming generation failed. Please try again."
+          getErrorMessage(
+            err,
+            "Streaming generation failed. Please try again."
+          )
         );
       }
     } finally {
@@ -235,7 +356,7 @@ export default function WorkspacePage() {
         </p>
       </div>
 
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-6 space-y-5">
+      <div className="space-y-5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-6">
         <div>
           <label
             htmlFor="prompt"
@@ -289,9 +410,7 @@ export default function WorkspacePage() {
               max="2"
               step="0.1"
               value={temperature}
-              onChange={(event) =>
-                setTemperature(Number(event.target.value))
-              }
+              onChange={(event) => setTemperature(Number(event.target.value))}
               disabled={isGenerating}
               className="mt-3 w-full accent-white"
             />
@@ -419,9 +538,4 @@ export default function WorkspacePage() {
       </div>
     </section>
   );
-}
-Get-Content .env.litellm | ForEach-Object {
-    if ($_ -match '^\s*([^#][^=]*)=(.*)$') {
-        [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim().Trim('"'), "Process")
-    }
 }
