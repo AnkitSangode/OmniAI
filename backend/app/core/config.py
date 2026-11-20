@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     IMAGE_MODEL_ID: str = "black-forest-labs/FLUX.1-schnell"
     IMAGE_PROVIDER: str = "auto"
     IMAGE_INFERENCE_TIMEOUT_SECONDS: int = 180
-    IMAGE_BACKEND: str = "mock"
+    IMAGE_BACKEND: str = "comfyui"
 
     # ComfyUI image generation
     COMFYUI_BASE_URL: str | None = None

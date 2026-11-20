@@ -1,3 +1,4 @@
+import logging
 
 import re
 
@@ -31,11 +32,14 @@ class LlamaGuardModerator:
         model: str,
         api_key: str | None = None,
         timeout_seconds: float = 30.0,
+        http_client: httpx.AsyncClient | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        # When provided, this client is shared and lifecycle-managed by FastAPI.
+        self.http_client = http_client
 
     def _build_prompt(
         self,
@@ -116,18 +120,35 @@ in the above conversation:
             "max_tokens": 50,
         }
 
-        async with httpx.AsyncClient(
-            timeout=self.timeout_seconds,
-        ) as client:
-            response = await client.post(
+        if self.http_client is not None:
+            response = await self.http_client.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=payload,
             )
             response.raise_for_status()
+        else:
+            # Backward-compatible path for standalone use and unit tests.
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+            ) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
 
         data = response.json()
         content = data["choices"][0]["message"]["content"]
+
+        logger = logging.getLogger(__name__)
+
+        logger.warning(
+            "Llama Guard classification: role=%s, result=%r",
+            role,
+            content,
+        )
 
         if not isinstance(content, str) or not content.strip():
             raise ValueError(

@@ -2,7 +2,7 @@
 from uuid import UUID
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,3 +53,9 @@ async def get_current_user(
         raise unauthorized
 
     return user
+
+
+
+def get_safety_service(request: Request):
+    """Return the application-lifespan safety service shared by all routes."""
+    return request.app.state.safety_service

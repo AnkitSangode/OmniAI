@@ -2,7 +2,7 @@
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.audio.kokoro_tts_provider import KokoroTTSProvider
@@ -10,7 +10,6 @@ from app.services.audio.mock_provider import MockTextToSpeechProvider
 from app.services.usage_tracking import build_usage_service
 
 from app.services.safety.safety_service import SafetyService
-from app.services.safety.llama_guard import LlamaGuardModerator
 from app.services.safety.schemas import (
     UnsafeContentError,
     SafetyServiceUnavailable,
@@ -42,6 +41,7 @@ MAX_AUDIO_SIZE = 25 * 1024 * 1024
 
 
 def get_audio_service(
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> AudioService:
 
@@ -105,24 +105,8 @@ def get_audio_service(
             ),
         )
 
-    # 3. Configure safety moderation only when enabled.
-    safety_service = None
-
-    if settings.SAFETY_ENABLED:
-        if settings.SAFETY_PROVIDER != "llama_guard":
-            raise HTTPException(
-                status_code=503,
-                detail="Unsupported safety provider.",
-            )
-
-        moderator = LlamaGuardModerator(
-            base_url=settings.SAFETY_BASE_URL,
-            model=settings.SAFETY_MODEL,
-            api_key=settings.SAFETY_API_KEY,
-            timeout_seconds=settings.SAFETY_TIMEOUT_SECONDS,
-        )
-
-        safety_service = SafetyService(moderator=moderator)
+    # 3. Reuse the lifespan-managed safety service shared with text and images.
+    safety_service: SafetyService | None = request.app.state.safety_service
 
     # 4. Configure audio storage.
     storage = AudioStorageService()

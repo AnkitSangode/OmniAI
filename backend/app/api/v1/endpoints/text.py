@@ -1,4 +1,3 @@
-
 import json
 import logging
 import re
@@ -68,9 +67,7 @@ def get_safety_service() -> SafetyService | None:
         return None
 
     if settings.SAFETY_PROVIDER != "llama_guard":
-        raise RuntimeError(
-            f"Unsupported safety provider: {settings.SAFETY_PROVIDER}"
-        )
+        raise RuntimeError(f"Unsupported safety provider: {settings.SAFETY_PROVIDER}")
 
     moderator = LlamaGuardModerator(
         base_url=settings.SAFETY_BASE_URL,
@@ -239,10 +236,16 @@ async def generate_text(
     generation = None
 
     # Input moderation must happen before calling LiteLLM.
+    input_moderation_started = perf_counter()
     try:
         await moderate_input(safety_service, payload)
     except (UnsafeContentError, SafetyServiceUnavailable) as exc:
         raise_safety_http_exception(exc)
+    finally:
+        logger.warning(
+            "[LATENCY] Input moderation: %.3f seconds",
+            perf_counter() - input_moderation_started,
+        )
 
     try:
         with observability.trace_generation(
@@ -251,19 +254,29 @@ async def generate_text(
             request_type="generate",
             model=model,
         ) as generation:
+            llm_started = perf_counter()
             response = await llm_client.generate(payload)
+            logger.warning(
+                "[LATENCY] LLM generation: %.3f seconds | Model: %s | Tokens: %s",
+                perf_counter() - llm_started,
+                response.model,
+                response.total_tokens,
+            )
 
             # Moderate the newly generated response before returning it.
             if safety_service is not None:
+                output_moderation_started = perf_counter()
                 try:
                     await safety_service.check_output(
-                            response.content,
-                            context=user_message,
-                        )
-                except UnsafeContentError:
-                    latency_ms = int(
-                        (perf_counter() - started_at) * 1000
+                        response.content,
+                        context=user_message,
                     )
+                except UnsafeContentError as exc:
+                    logger.warning(
+                        "[SAFETY] Non-stream output rejected. Categories: %s",
+                        list(exc.categories),
+                    )
+                    latency_ms = int((perf_counter() - started_at) * 1000)
 
                     estimated_cost = calculate_cost_safely(
                         usage_service,
@@ -312,9 +325,7 @@ async def generate_text(
                     )
 
                 except SafetyServiceUnavailable as exc:
-                    latency_ms = int(
-                        (perf_counter() - started_at) * 1000
-                    )
+                    latency_ms = int((perf_counter() - started_at) * 1000)
 
                     update_observability_safely(
                         observability,
@@ -345,14 +356,15 @@ async def generate_text(
 
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail=(
-                            "Safety moderation is temporarily unavailable."
-                        ),
+                        detail=("Safety moderation is temporarily unavailable."),
                     ) from exc
+                finally:
+                    logger.warning(
+                        "[LATENCY] Output moderation: %.3f seconds",
+                        perf_counter() - output_moderation_started,
+                    )
 
-            latency_ms = int(
-                (perf_counter() - started_at) * 1000
-            )
+            latency_ms = int((perf_counter() - started_at) * 1000)
 
             estimated_cost = calculate_cost_safely(
                 usage_service,
@@ -526,6 +538,7 @@ async def stream_text(
         moderation_buffer = ""
         approved_context = ""
         output_moderation_started = False
+        llm_stream_started = None
 
         with observability.trace_generation(
             request_id=request_id,
@@ -535,8 +548,16 @@ async def stream_text(
         ) as generation:
             try:
                 # Reject unsafe prompts before starting generation.
-                await moderate_input(safety_service, payload)
+                input_moderation_started = perf_counter()
+                try:
+                    await moderate_input(safety_service, payload)
+                finally:
+                    logger.warning(
+                        "[STREAM LATENCY] Input moderation: %.3f seconds",
+                        perf_counter() - input_moderation_started,
+                    )
 
+                llm_stream_started = perf_counter()
                 async for event in llm_client.stream(payload):
                     if await request.is_disconnected():
                         request_status = "cancelled"
@@ -552,10 +573,12 @@ async def stream_text(
                             continue
 
                         if safety_service is None:
-                            yield create_sse_event({
-                                "type": "content",
-                                "content": content,
-                            })
+                            yield create_sse_event(
+                                {
+                                    "type": "content",
+                                    "content": content,
+                                }
+                            )
                             continue
 
                         moderation_buffer += content
@@ -564,7 +587,10 @@ async def stream_text(
                         # The length fallback prevents a very long sentence
                         # (or text without punctuation) from being held forever.
                         while True:
-                            match = re.search(r"[.!?。！？](?:[\"'”’\)\]\}]+)?(?:\s+|$)", moderation_buffer)
+                            match = re.search(
+                                r"[.!?。！？](?:[\"'”’\)\]\}]+)?(?:\s+|$)",
+                                moderation_buffer,
+                            )
                             if match:
                                 split_at = match.end()
                             elif len(moderation_buffer) >= 500:
@@ -578,65 +604,111 @@ async def stream_text(
                             moderation_buffer = moderation_buffer[split_at:]
 
                             moderation_context = "\n".join(
-                                part for part in (user_message, approved_context)
+                                part
+                                for part in (user_message, approved_context)
                                 if part
                             )
                             output_moderation_started = True
-                            await safety_service.check_output(
-                                moderation_window,
-                                context=moderation_context or None,
+                            segment_moderation_started = perf_counter()
+                            logger.warning(
+                                "[STREAM SAFETY] Checking segment: chars=%d | context_chars=%d",
+                                len(moderation_window),
+                                len(moderation_context),
                             )
+                            try:
+                                await safety_service.check_output(
+                                    moderation_window,
+                                    context=moderation_context or None,
+                                )
+                            except UnsafeContentError as exc:
+                                logger.warning(
+                                    "[STREAM SAFETY] Segment rejected. Categories: %s",
+                                    list(exc.categories),
+                                )
+                                raise
+                            finally:
+                                logger.warning(
+                                    "[STREAM LATENCY] Output moderation: %.3f seconds",
+                                    perf_counter() - segment_moderation_started,
+                                )
 
-                            yield create_sse_event({
-                                "type": "content",
-                                "content": moderation_window,
-                            })
-                            approved_context = (
-                                approved_context + moderation_window
-                            )[-2000:]
+                            yield create_sse_event(
+                                {
+                                    "type": "content",
+                                    "content": moderation_window,
+                                }
+                            )
+                            approved_context = (approved_context + moderation_window)[
+                                -2000:
+                            ]
 
                     elif event_type == "usage":
                         prompt_tokens = event.get("prompt_tokens", 0)
-                        completion_tokens = event.get(
-                            "completion_tokens", 0
-                        )
+                        completion_tokens = event.get("completion_tokens", 0)
                         total_tokens = event.get("total_tokens", 0)
 
-                        yield create_sse_event({
-                            "type": "usage",
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": total_tokens,
-                        })
+                        yield create_sse_event(
+                            {
+                                "type": "usage",
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": total_tokens,
+                            }
+                        )
 
                     elif event_type == "finish":
-                        yield create_sse_event({
-                            "type": "finish",
-                            "finish_reason": event.get("finish_reason"),
-                        })
+                        yield create_sse_event(
+                            {
+                                "type": "finish",
+                                "finish_reason": event.get("finish_reason"),
+                            }
+                        )
 
                     elif event_type == "done":
                         # The final fragment may not end with punctuation.
                         if safety_service is not None and moderation_buffer:
                             moderation_context = "\n".join(
-                                part for part in (user_message, approved_context)
+                                part
+                                for part in (user_message, approved_context)
                                 if part
                             )
                             output_moderation_started = True
-                            await safety_service.check_output(
-                                moderation_buffer,
-                                context=moderation_context or None,
+                            final_moderation_started = perf_counter()
+                            logger.warning(
+                                "[STREAM SAFETY] Checking final fragment: chars=%d | context_chars=%d",
+                                len(moderation_buffer),
+                                len(moderation_context),
                             )
-                            yield create_sse_event({
-                                "type": "content",
-                                "content": moderation_buffer,
-                            })
+                            try:
+                                await safety_service.check_output(
+                                    moderation_buffer,
+                                    context=moderation_context or None,
+                                )
+                            except UnsafeContentError as exc:
+                                logger.warning(
+                                    "[STREAM DEBUG] Rejected segment: %r",
+                                    moderation_window,
+                                )
+                                raise
+                            finally:
+                                logger.warning(
+                                    "[STREAM LATENCY] Final output moderation: %.3f seconds",
+                                    perf_counter() - final_moderation_started,
+                                )
+                            yield create_sse_event(
+                                {
+                                    "type": "content",
+                                    "content": moderation_buffer,
+                                }
+                            )
                             moderation_buffer = ""
 
-                        yield create_sse_event({
-                            "type": "done",
-                            "request_id": request_id,
-                        })
+                        yield create_sse_event(
+                            {
+                                "type": "done",
+                                "request_id": request_id,
+                            }
+                        )
 
             except UnsafeContentError as exc:
                 request_status = "failed"
@@ -649,28 +721,28 @@ async def stream_text(
                     )
                 else:
                     error_code = "unsafe_input"
-                    message = (
-                        "Your prompt was blocked by safety moderation."
-                    )
+                    message = "Your prompt was blocked by safety moderation."
 
-                yield create_sse_event({
-                    "type": "error",
-                    "message": message,
-                    "code": error_code,
-                    "categories": list(exc.categories),
-                })
+                yield create_sse_event(
+                    {
+                        "type": "error",
+                        "message": message,
+                        "code": error_code,
+                        "categories": list(exc.categories),
+                    }
+                )
 
             except SafetyServiceUnavailable:
                 request_status = "failed"
                 error_code = "safety_unavailable"
 
-                yield create_sse_event({
-                    "type": "error",
-                    "message": (
-                        "Safety moderation is temporarily unavailable."
-                    ),
-                    "code": error_code,
-                })
+                yield create_sse_event(
+                    {
+                        "type": "error",
+                        "message": ("Safety moderation is temporarily unavailable."),
+                        "code": error_code,
+                    }
+                )
 
             except LiteLLMTimeoutError as exc:
                 logger.exception(
@@ -682,11 +754,13 @@ async def stream_text(
                 request_status = "failed"
                 error_code = "llm_timeout"
 
-                yield create_sse_event({
-                    "type": "error",
-                    "message": "AI generation request timed out.",
-                    "code": error_code,
-                })
+                yield create_sse_event(
+                    {
+                        "type": "error",
+                        "message": "AI generation request timed out.",
+                        "code": error_code,
+                    }
+                )
 
             except LiteLLMRequestError as exc:
                 logger.exception(
@@ -698,11 +772,13 @@ async def stream_text(
                 request_status = "failed"
                 error_code = "llm_gateway_error"
 
-                yield create_sse_event({
-                    "type": "error",
-                    "message": "AI generation service is unavailable.",
-                    "code": error_code,
-                })
+                yield create_sse_event(
+                    {
+                        "type": "error",
+                        "message": "AI generation service is unavailable.",
+                        "code": error_code,
+                    }
+                )
 
             except LiteLLMError as exc:
                 logger.exception(
@@ -714,11 +790,13 @@ async def stream_text(
                 request_status = "failed"
                 error_code = "llm_gateway_error"
 
-                yield create_sse_event({
-                    "type": "error",
-                    "message": "AI generation service is unavailable.",
-                    "code": error_code,
-                })
+                yield create_sse_event(
+                    {
+                        "type": "error",
+                        "message": "AI generation service is unavailable.",
+                        "code": error_code,
+                    }
+                )
 
             except Exception:
                 request_status = "failed"
@@ -729,16 +807,22 @@ async def stream_text(
                     request_id,
                 )
 
-                yield create_sse_event({
-                    "type": "error",
-                    "message": "An unexpected error occurred.",
-                    "code": error_code,
-                })
+                yield create_sse_event(
+                    {
+                        "type": "error",
+                        "message": "An unexpected error occurred.",
+                        "code": error_code,
+                    }
+                )
 
             finally:
-                latency_ms = int(
-                    (perf_counter() - started_at) * 1000
-                )
+                if llm_stream_started is not None:
+                    logger.warning(
+                        "[STREAM LATENCY] Stream loop duration (includes moderation waits): %.3f seconds",
+                        perf_counter() - llm_stream_started,
+                    )
+
+                latency_ms = int((perf_counter() - started_at) * 1000)
 
                 estimated_cost = calculate_cost_safely(
                     usage_service,

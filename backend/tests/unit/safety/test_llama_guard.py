@@ -138,3 +138,30 @@ async def test_http_failure_is_propagated(moderator):
                 "Hello",
                 role="user",
             )
+
+
+
+@pytest.mark.asyncio
+async def test_injected_http_client_is_reused(moderator):
+    mock_response = {
+        "choices": [{"message": {"content": "safe"}}]
+    }
+    response = MagicMock()
+    response.json.return_value = mock_response
+    response.raise_for_status.return_value = None
+
+    shared_client = MagicMock()
+    shared_client.post = AsyncMock(return_value=response)
+
+    shared_moderator = LlamaGuardModerator(
+        base_url="http://localhost:11434/v1",
+        model="llama-guard3:1b",
+        http_client=shared_client,
+    )
+
+    first = await shared_moderator.moderate("Hello", role="user")
+    second = await shared_moderator.moderate("Hi again", role="user")
+
+    assert first.is_safe is True
+    assert second.is_safe is True
+    assert shared_client.post.await_count == 2
